@@ -1,0 +1,28 @@
+# Copy to config.yaml and edit. Secrets (Telegram) live in .env, not here.
+feed:
+  url: https://spin3.sos112.si/javno/ODApi/52034
+  poll_interval_s: 2        # start at 2; go to 1 only if the operator agrees
+  timeout_s: 3              # hard cap per poll; a slow poll skips ticks, never overlaps
+  max_age_min: 10           # on startup, ignore items with pubDate older than this
+  down_after_s: 60          # alert if no healthy HTTP response for this long
+  expected_link_contains: "OD/52034"   # canary: alert if channel self-link stops containing this
+  user_agent: "SHERPA/0.1 (private first-responder notifier)"
+
+devices:
+  - name: led-bar-1
+    ip: 192.168.1.50        # host or host:port
+    generation: 1           # 1 = Gen1 (Shelly 1/1PM/2.5...), 2 = Gen2/Plus/Pro
+    model: "Shelly 1"       # free-text label only
+    channel: 0
+    on_duration_s: 300      # device-side auto-off timer, survives app death
+    timeout_s: 3
+    attempts: 4             # total tries incl. the first
+    retry_delay_s: 0.5
+
+alerts:
+  heartbeat_min: 0          # 0 = off; e.g. 360 for a status message every 6 h
+  repeat_min: 30            # re-send a still-active alert every N minutes (0 = once)
+  device_check_interval_s: 300   # read-only reachability probe of every Shelly
+
+db_path: data/sherpa.db
+log_level: INFO

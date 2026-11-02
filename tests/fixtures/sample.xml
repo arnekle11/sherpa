@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic fixture built from the item structure observed on the real feed; channel text is a placeholder. -->
+<rss version="2.0"><channel>
+<title>SOS 112</title><link>https://spin3.sos112.si/javno/OD/52034</link><description>javni dogodki</description>
+<item><title>Požar, eksplozija 2. 11. 2026 17:30</title><description>Ljubljana</description><link>https://spin3.sos112.si/javno/zemljevid/501</link><guid>https://spin3.sos112.si/javno/zemljevid/501</guid><pubDate>Mon, 02 Nov 2026 16:30:00 GMT</pubDate></item>
+<item><title>Prometna nesreča 2. 11. 2026 16:10</title><description>Na avtocesti je prišlo do trčenja dveh vozil.</description><link>https://spin3.sos112.si/javno/zemljevid/499</link><guid>https://spin3.sos112.si/javno/zemljevid/499</guid><pubDate>Mon, 02 Nov 2026 15:10:00 GMT</pubDate></item>
+<item><title>Tehnična in druga pomoč 2. 11. 2026 16:55</title><description>Maribor</description><link>https://spin3.sos112.si/javno/zemljevid/500</link><guid>https://spin3.sos112.si/javno/zemljevid/500</guid><pubDate>Mon, 02 Nov 2026 15:55:00 GMT</pubDate></item>
+</channel></rss>

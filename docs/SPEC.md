@@ -1,0 +1,49 @@
+# SHERPA - Specification and decisions
+
+SHERPA = Smart Home Emergency Response Platform for Alerting.
+
+## Goal
+When a new item appears in a public SOS 112 RSS feed, immediately switch on a Shelly relay
+that powers an LED bar for 5 minutes. Used by first responders: **reliability and visible
+failures matter more than features**. One Shelly now; designed for many.
+
+**This feed is a public information service and must NOT be the only alert path.**
+
+## The feed (confirmed from real responses)
+- `https://spin3.sos112.si/javno/ODApi/52034` - 52034 is a *server-side filter*. Every new item is a trigger; no client-side matching of type/place.
+- RSS 2.0, GET only (HEAD -> 405), HTTP/1.1. No push; polling is the only option.
+- No ETag/Last-Modified/Cache-Control/rate-limit headers -> conditional requests impossible. Rate limit unknown (to ask the operator).
+- Idle = valid RSS, empty channel, ~287 bytes. **Empty is the normal state, not an error.**
+- Timing from author's PC: DNS 19 ms, TCP 13, TLS 26, server think ~142 (dominant), total ~200 ms. Keep-alive saves ~60 ms/poll.
+- Item: `title` "<Event type> D. M. YYYY HH:MM" (local time); `description` = municipality (new) or a Slovenian report (filled in later); `guid` = `link` = `https://spin3.sos112.si/javno/zemljevid/<id>`; `pubDate` GMT.
+- Item order is NOT reliable; items stay ~31 h (~35 on the unfiltered feed); content changes after first appearance, guid stays.
+- Channel self-link reflects the filter (`.../OD/52034`) - canary for a changed filter.
+- Event types seen: Prometna nesreča, Tehnična in druga pomoč, Požar eksplozija, Onesnaženje nesreče z nevarnimi snovmi.
+
+## Decisions
+| Area | Decision |
+|---|---|
+| Stack | Python 3.12, asyncio, httpx (persistent connection), lxml, SQLite, YAML config (pydantic-validated), Docker Compose |
+| Deploy | Small Ubuntu VM on Proxmox, fixed IP. Not Windows Server. |
+| Polling | `poll_interval_s` in config; start 2 s, aim 1 s if operator agrees. Polls never overlap: ~3 s hard timeout; a slow poll **skips ticks, never queues**. |
+| Dedupe | By guid, persisted in SQLite (`synchronous=FULL`). Trigger only the first time a guid is seen; later description edits ignored. |
+| Startup | Items with `pubDate` older than `max_age_min` are recorded as `ignored_old` on the first successful poll, never triggered. After that, any unseen guid triggers (so events that appeared during an outage are not lost). |
+| Crash safety | An event is recorded `pending` *before* dispatch; on restart, `pending` rows younger than `max_age_min` are re-dispatched. |
+| Action | ON with **device-side** auto-off timer (Gen1 `timer=300`; Gen2 `toggle_after=300`). Survives app death. A new event re-sends ON, restarting the timer (extends). |
+| Confirmation | Read back state; success = relay on **and** a timer armed. Relay on without a timer is a failure (it would never turn off). |
+| Devices | By LAN IP, config list (name, ip, generation, model label, channel, on_duration_s, timeout, attempts). Dispatched in parallel, per-device timeout + retries (exponential backoff). One adapter per generation behind `ShellyDevice`. |
+| Alerts | Telegram (token/chat id in `.env`, never git): feed unreachable > `down_after_s`; Shelly fails to confirm; feed structure or self-link change; start/restart; optional heartbeat; Shelly unreachable (periodic read-only probe). State-based: sent once, reminder every `repeat_min`, "recovered" message on clear. |
+| Logging | Every new event logs `first_seen` vs `pubDate` (`EVENT_NEW ... lag_s=`) and stores it in SQLite; `sherpa lag` summarises. Needs NTP-synced VM clock. |
+| Tests | `sherpa test-event` (real dispatch path to real Shellies), `sherpa selftest` (full pipeline vs mocks), `sherpa check` (read-only preflight vs the real feed + Shellies). |
+| Runtime | Docker, `restart: unless-stopped`, healthcheck on poll-loop liveness. |
+
+## Open items
+- Shelly model/generation: write both adapters; config choice until `http://SHELLY_IP/shelly` output is known.
+- Operator's rate limit / permission for 1 s polling (email pending).
+- Real lag between emergency and feed item: measure with `sherpa lag` first.
+- Shelly authentication (Gen1 basic / Gen2 digest) is **not implemented**; assumes LAN with auth disabled.
+- Adapters are verified only against mock Shellies written from the Shelly docs; verify with `sherpa test-event --duration 10` on real hardware.
+
+## Known limitations
+- A silent failure of the *feed itself* (items stop being published) is undetectable; the heartbeat shows "last event" but an empty feed is legitimately normal.
+- The self-test proves the pipeline, not that the real filter 52034 selects the right events.

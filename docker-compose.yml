@@ -1,0 +1,23 @@
+services:
+  sherpa:
+    build: .
+    container_name: sherpa
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Europe/Ljubljana}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - sherpa-data:/data      # SQLite dedupe DB + health file; must persist across restarts
+    # Set db_path: /data/sherpa.db in config.yaml when running in Docker.
+    healthcheck:
+      test: ["CMD", "sherpa", "healthcheck", "--file", "/data/health", "--max-age", "30"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+volumes:
+  sherpa-data:
