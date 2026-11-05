@@ -22,7 +22,8 @@ devices:
 alerts:
   heartbeat_min: 0          # 0 = off; e.g. 360 for a status message every 6 h
   repeat_min: 30            # re-send a still-active alert every N minutes (0 = once)
-  device_check_interval_s: 300   # read-only reachability probe of every Shelly
+  device_check_interval_s: 300   # read-only reachability probe of every Shelly (first one 3 s after start)
+  deadman_interval_s: 60    # dead-man's switch ping period; only used when SHERPA_DEADMAN_URL is set
 
 db_path: data/sherpa.db
 log_level: INFO

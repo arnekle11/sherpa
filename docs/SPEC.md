@@ -43,6 +43,11 @@ failures matter more than features**. One Shelly now; designed for many.
 - Editable: poll interval (floor 2 s), max_age, down_after, repeat/heartbeat/device-check, device list. Not editable: feed URL, canary, db_path, Telegram.
 - Apply = web atomically rewrites `config/config.yaml` (+ `.bak`); the service polls the file mtime every 5 s, validates it, and exits with code 75 so `restart: unless-stopped` restarts it. Invalid file => alert `config-invalid`, old settings keep running. Restart is safe: unseen items newer than max_age are still triggered, pending rows are re-dispatched.
 - Hardening: no JS, CSP `default-src 'none'`, escaped output, CSRF token, SameSite=Strict cookie, 30 min idle session, 5 failed logins / 5 min lockout.
+- Maintenance tools: the web writes a JSON command to `/data/commands`; the service claims it (read + delete = at most once), re-validates kind/age (60 s)/duration (1-60 s), rate-limits test events to 1 per 30 s, and runs it through the normal alert/dispatch path. The web never talks to devices.
+- Observability: `poll_log` table (per-minute ok/failed/skipped + latency, flushed once a minute, 60-day retention); Stats page; `/metrics`, `/api/status`, `/events.csv` (cells starting with = + - @ are prefixed with ').
+
+## Dead-man's switch
+Optional `SHERPA_DEADMAN_URL` (secret, `.env`): pinged every `deadman_interval_s` (>= 10 s) only while the poll loop completed an iteration within max(30 s, 5 x poll interval). Failures are logged by type/HTTP status only, never with the URL. This is the only way to learn that the VM itself is down; strongly recommended in production.
 
 ## Open items
 - Shelly model/generation: write both adapters; config choice until `http://SHELLY_IP/shelly` output is known.
@@ -52,5 +57,6 @@ failures matter more than features**. One Shelly now; designed for many.
 - Adapters are verified only against mock Shellies written from the Shelly docs; verify with `sherpa test-event --duration 10` on real hardware.
 
 ## Known limitations
+- Web sessions live in memory: restarting the web container logs everyone out.
 - A silent failure of the *feed itself* (items stop being published) is undetectable; the heartbeat shows "last event" but an empty feed is legitimately normal.
 - The self-test proves the pipeline, not that the real filter 52034 selects the right events.
