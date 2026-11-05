@@ -37,6 +37,13 @@ failures matter more than features**. One Shelly now; designed for many.
 | Tests | `sherpa test-event` (real dispatch path to real Shellies), `sherpa selftest` (full pipeline vs mocks), `sherpa check` (read-only preflight vs the real feed + Shellies). |
 | Runtime | Docker, `restart: unless-stopped`, healthcheck on poll-loop liveness. |
 
+## Web UI (added after the first deploy)
+- Separate `sherpa web` process/container: read-only for anyone on the LAN (status, devices, events + lag, alert history); settings need `SHERPA_WEB_PASSWORD`. Plain HTTP, LAN only.
+- Data flow: service writes `/data/status.json` (every >=5 s) and the SQLite `events` + `alert_log` tables; web opens the DB read-only.
+- Editable: poll interval (floor 2 s), max_age, down_after, repeat/heartbeat/device-check, device list. Not editable: feed URL, canary, db_path, Telegram.
+- Apply = web atomically rewrites `config/config.yaml` (+ `.bak`); the service polls the file mtime every 5 s, validates it, and exits with code 75 so `restart: unless-stopped` restarts it. Invalid file => alert `config-invalid`, old settings keep running. Restart is safe: unseen items newer than max_age are still triggered, pending rows are re-dispatched.
+- Hardening: no JS, CSP `default-src 'none'`, escaped output, CSRF token, SameSite=Strict cookie, 30 min idle session, 5 failed logins / 5 min lockout.
+
 ## Open items
 - Shelly model/generation: write both adapters; config choice until `http://SHELLY_IP/shelly` output is known.
 - Operator's rate limit / permission for 1 s polling (email pending).
