@@ -1,15 +1,16 @@
 services:
   sherpa:
     build: .
+    image: sherpa:local
     container_name: sherpa
     restart: unless-stopped
     env_file: .env
     environment:
       TZ: ${TZ:-Europe/Ljubljana}
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config:/config:ro       # config/config.yaml; the web UI edits it, the service restarts itself to apply
       - sherpa-data:/data      # SQLite dedupe DB + health file; must persist across restarts
-    # Set db_path: /data/sherpa.db in config.yaml when running in Docker.
+    # Set db_path: /data/sherpa.db in config/config.yaml when running in Docker.
     healthcheck:
       test: ["CMD", "sherpa", "healthcheck", "--file", "/data/health", "--max-age", "30"]
       interval: 30s
@@ -18,6 +19,32 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "5"}
+
+  web:
+    # Dashboard, event/alert history and settings. Separate process: it cannot disturb the poll loop.
+    # Gets only the web password (not the Telegram token). No password => read-only.
+    image: sherpa:local
+    container_name: sherpa-web
+    restart: unless-stopped
+    command: ["web", "-c", "/config/config.yaml", "--port", "8080"]
+    environment:
+      TZ: ${TZ:-Europe/Ljubljana}
+      SHERPA_WEB_PASSWORD: ${SHERPA_WEB_PASSWORD:-}
+    ports:
+      - "${SHERPA_WEB_PORT:-8080}:8080"   # plain HTTP: keep it on the LAN, never expose it to the internet
+    volumes:
+      - ./config:/config
+      - sherpa-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
 
 volumes:
   sherpa-data:

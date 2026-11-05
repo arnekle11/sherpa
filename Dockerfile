@@ -8,4 +8,4 @@ USER sherpa
 ENV PYTHONPATH=
 VOLUME /data
 ENTRYPOINT ["sherpa"]
-CMD ["run", "-c", "/app/config.yaml"]
+CMD ["run", "-c", "/config/config.yaml"]
