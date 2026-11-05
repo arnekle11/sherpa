@@ -242,9 +242,9 @@ def settings_page(w: Web, sess: dict | None, errors: list[str] | None = None, sa
         return page("Settings", '<div class="card"><h2>Settings</h2><p>Log in to view and change settings.</p>'
                                 '<p><a href="/login" style="color:var(--acc)">Log in</a></p></div>', False, "s")
     try:
-        raw = settings.load_raw(w.config_path)
+        raw = load_config(w.config_path).model_dump()  # effective values: keys omitted from the file show defaults
         digest = settings.config_hash(w.config_path)
-    except (OSError, ValueError) as e:
+    except Exception as e:
         return page("Settings", f'<div class="err">Cannot read config: {_e(str(e))}</div>', True, "s")
     f = form if form is not None else {}
 

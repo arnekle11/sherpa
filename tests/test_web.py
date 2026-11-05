@@ -108,6 +108,15 @@ def test_edit_flow_with_csrf(site):
         assert load_config(path).feed.poll_interval_s == 3
 
 
+def test_settings_form_is_prefilled_with_defaults_for_omitted_keys(site):
+    base, _, _ = site
+    with httpx.Client() as c:
+        _login(c, base)
+        page = c.get(base + "/settings").text
+        for field, v in (("feed.max_age_min", "10.0"), ("feed.down_after_s", "60.0"), ("alerts.heartbeat_min", "0")):
+            assert re.search(rf'id="{re.escape(field)}"[^>]*value="{re.escape(v)}"', page), field
+
+
 def test_logout_ends_session(site):
     base, _, _ = site
     with httpx.Client() as c:
