@@ -43,11 +43,12 @@ failures matter more than features**. One Shelly now; designed for many.
 - Editable: poll interval (floor 2 s), max_age, down_after, repeat/heartbeat/device-check, device list. Not editable: feed URL, canary, db_path, Telegram.
 - Apply = web atomically rewrites `config/config.yaml` (+ `.bak`); the service polls the file mtime every 5 s, validates it, and exits with code 75 so `restart: unless-stopped` restarts it. Invalid file => alert `config-invalid`, old settings keep running. Restart is safe: unseen items newer than max_age are still triggered, pending rows are re-dispatched.
 - Hardening: no JS, CSP `default-src 'none'`, escaped output, CSRF token, SameSite=Strict cookie, 30 min idle session, 5 failed logins / 5 min lockout.
+- Test events vs real alerts: a test re-arms every timer to 1-60 s, so it is refused while a real event is younger than max(on_duration_s) + 30 s (DB, survives restarts), a real activation ran in that window (in memory: covers recovery), or any relay reads ON; plus a 30 s cooldown between tests (DB). A real dispatch cancels an in-flight test and, if they overlapped, re-sends the real ON immediately and once more after max(timeout_s) + 1 s so a late test request cannot win. Pending test rows are marked `abandoned` at startup, never re-dispatched.
 - Maintenance tools: the web writes a JSON command to `/data/commands`; the service claims it (read + delete = at most once), re-validates kind/age (60 s)/duration (1-60 s), rate-limits test events to 1 per 30 s, and runs it through the normal alert/dispatch path. The web never talks to devices.
 - Observability: `poll_log` table (per-minute ok/failed/skipped + latency, flushed once a minute, 60-day retention); Stats page; `/metrics`, `/api/status`, `/events.csv` (cells starting with = + - @ are prefixed with ').
 
 ## Dead-man's switch
-Optional `SHERPA_DEADMAN_URL` (secret, `.env`): pinged every `deadman_interval_s` (>= 10 s) only while the poll loop completed an iteration within max(30 s, 5 x poll interval). Failures are logged by type/HTTP status only, never with the URL. This is the only way to learn that the VM itself is down; strongly recommended in production.
+Optional `SHERPA_DEADMAN_URL` (secret, `.env`): pinged every `deadman_interval_s` (>= 10 s) only while a poll completed *without crashing* within max(30 s, 5 x poll interval) (a feed outage is not a crash: SHERPA alerts about that itself). Only `sherpa run` pings; selftest and test-event never do. Failures are logged by type/HTTP status only, never with the URL. This is the only way to learn that the VM itself is down; strongly recommended in production.
 
 ## Open items
 - Shelly model/generation: write both adapters; config choice until `http://SHELLY_IP/shelly` output is known.

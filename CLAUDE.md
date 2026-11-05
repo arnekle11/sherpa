@@ -18,6 +18,10 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - Polls never overlap; slow polls skip ticks. No exception may kill the poll loop.
 - Auto-off timer is always device-side. "Relay on, no timer" is a failure.
 - Empty feed is normal; structure/self-link changes and outages must alert.
+- A test event must never shorten a real alert (it re-arms timers to a few seconds): it is refused while a real
+  event is younger than on_duration + 30 s or any relay is ON, a real event cancels a running test and re-sends
+  its ON, and test rows are never replayed as real activations after a restart.
+- Only `sherpa run` may ping the dead-man URL (selftest/test-event must not report "alive").
 - The web process never switches devices or sends Telegram itself: it queues a command, the service validates and runs it.
 - The web UI must never be able to stop polling (separate process), never expose Telegram secrets, and never allow poll_interval < 2 s. All feed text shown in it is untrusted: escape it.
 - Secrets only in `.env`; never log the Telegram token (httpx INFO logging is silenced for this reason).
