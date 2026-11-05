@@ -56,13 +56,14 @@ class App:
         self._logged_link = False
         self.health_file = Path(cfg.db_path).parent / "health"
         self.status_file = Path(cfg.db_path).parent / "status.json"  # read by the web UI
-        self._status_written = 0.0
         self.device_status: dict[str, dict] = {}
         self.config_poll_s = 5.0
         self.pollstats = PollStats()
         self.last_items: list[dict] = []  # what the feed currently contains, for the web UI
         self.last_items_at: float | None = None  # wall-clock time of the last successful parse
         self._last_poll_ok = time.monotonic()  # last poll iteration that did not crash
+        self._last_poll_done = time.monotonic()  # last poll iteration, crashed or not
+        self.status_every_s = 5.0
         self.poll_health_grace_s = max(30.0, 5 * cfg.feed.poll_interval_s)
         self.command_poll_s = 2.0
         self._real_dispatches = 0  # bumped whenever a real activation starts
@@ -87,6 +88,7 @@ class App:
             f"started v{__version__}; polling {self.cfg.feed.url} every {self.cfg.feed.poll_interval_s}s; "
             f"devices: {', '.join(f'{d.name}@{d.ip}' for d in self.cfg.devices)}")
         loops = [asyncio.create_task(self._poll_loop(), name="poll"),
+                 asyncio.create_task(self._status_loop(), name="status"),
                  asyncio.create_task(self._device_probe_loop(), name="probe"),
                  asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
                  asyncio.create_task(self._summary_loop(), name="summary"),
@@ -104,6 +106,7 @@ class App:
             if self._tasks:  # let in-flight activations finish: they are the whole point
                 await asyncio.wait(self._tasks, timeout=15)
             self._flush_stats()
+            self._write_status()
             await self.alerts.drain()
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
@@ -145,6 +148,7 @@ class App:
         next_tick = loop.time()
         while not self._stop.is_set():
             await self.poll_once()
+            self._last_poll_done = time.monotonic()
             self._touch_health()
             next_tick += interval
             now = loop.time()
@@ -335,24 +339,29 @@ class App:
                      self.polls_ok, self.polls_failed, self.polls_skipped, self.events_triggered)
 
     def _touch_health(self) -> None:
+        """Poll-loop liveness for the Docker healthcheck (touched after every poll)."""
         try:
             self.health_file.parent.mkdir(parents=True, exist_ok=True)
             self.health_file.touch()
         except OSError:
             pass
-        self._write_status()
 
-    def _write_status(self, min_interval_s: float = 5.0) -> None:
+    async def _status_loop(self) -> None:
+        """Written on its own clock, not after polls: a slow poll interval must not look like a dead service.
+        'written' proves the process is alive; 'last_poll_age_s' says whether polling is."""
+        while True:
+            self._write_status()
+            await asyncio.sleep(self.status_every_s)
+
+    def _write_status(self) -> None:
         """Snapshot for the web UI (a separate process). Best effort: must never disturb polling."""
         now = time.monotonic()
-        if now - self._status_written < min_interval_s:
-            return
-        self._status_written = now
         try:
             snap = {
                 "written": time.time(), "version": __version__,
                 "uptime_s": now - self._started,
                 "poll_interval_s": self.cfg.feed.poll_interval_s,
+                "last_poll_age_s": now - self._last_poll_done,
                 "polls_ok": self.polls_ok, "polls_failed": self.polls_failed,
                 "polls_skipped": self.polls_skipped, "events_triggered": self.events_triggered,
                 "last_event_at": self.last_event_at.isoformat(timespec="seconds") if self.last_event_at else None,

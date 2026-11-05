@@ -100,7 +100,8 @@ def test_csv_export_neutralises_formulas(site):
 def test_api_status_and_metrics(site):
     base, _, sp = site
     j = httpx.get(base + "/api/status").json()
-    assert j["level"] == "ok" and j["status"]["polls_ok"] == 50
+    assert j["level"] == "warn" and j["summary"] == "Not notifying"  # fixture: Telegram not configured
+    assert j["status"]["polls_ok"] == 50
     m = httpx.get(base + "/metrics").text
     assert "sherpa_up 1" in m and 'sherpa_polls_total{result="failed"} 1' in m
     assert "sherpa_telegram_delivery_ok -1" in m  # not configured: unknown, not "ok"
@@ -188,13 +189,14 @@ def test_delivery_failure_banner_and_metrics(site):
     sp.write_text(json.dumps(_status(telegram_configured=True, telegram_delivery={
         "ok": False, "error": "HTTP 401 Unauthorized", "undelivered": 2, "queued": 0})))
     d = httpx.get(base + "/").text
-    assert "Telegram messages are failing to send" in d and "401" in d and "2 messages given up" in d
+    assert "Running, but nobody is notified" in d and "Telegram messages are failing" in d
+    assert "401" in d and "2 messages given up" in d and "Not notifying" in d
     m = httpx.get(base + "/metrics").text
     assert "sherpa_telegram_delivery_ok 0" in m and "sherpa_alerts_undelivered_total 2" in m
     sp.write_text(json.dumps(_status(telegram_configured=True, telegram_delivery={"ok": True, "error": None,
                                                                                    "undelivered": 0, "queued": 0})))
     d = httpx.get(base + "/").text
-    assert "failing to send" not in d and "delivering" in d
+    assert "messages are failing" not in d and "delivering" in d and "All systems operational" in d
 
 
 def test_old_status_file_shows_telegram_unknown(site):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -130,6 +131,39 @@ def cmd_lag(args) -> int:
     return 0
 
 
+def cmd_status(args) -> int:
+    """One-screen summary for SSH sessions; same rules as the web dashboard. Exit 0 ok, 1 attention, 2 no data."""
+    from .web import Web
+    from .webpages import alert_help, alert_label, ago, dur, not_notifying, overview
+    try:
+        w = Web(args.config, None)
+    except Exception as e:
+        sys.exit(f"config error ({args.config}): {e}")
+    ov = overview(w)
+    st = ov["st"]
+    print(f"SHERPA: {ov['pill'].upper()}")
+    if st is None:
+        print("  no status yet: the service is not running, or this is not its config/data volume")
+        return 2
+    print(f"  status written {ago(time.time() - st['written'])}; last poll {ago(st.get('last_poll_age_s') or 0)}; "
+          f"polling every {st['poll_interval_s']:g} s; up {dur(st['uptime_s'])}")
+    print(f"  polls since start: ok={st['polls_ok']} failed={st['polls_failed']} skipped={st['polls_skipped']}; "
+          f"last good feed response {ago(st['feed_ok_age_s'])}")
+    why = not_notifying(st)
+    tel = {"not_configured": "NOT configured", "failing": "FAILING"}.get(why or "", "ok")
+    dm = st.get("deadman") or {}
+    print(f"  telegram: {tel}; dead-man's switch: "
+          + ("not configured" if not dm.get("configured") else (f"failing ({dm['last_error']})" if dm.get("last_error") else "pinging")))
+    for name, d in (st.get("devices") or {}).items():
+        print(f"  device {name} ({d.get('ip')}): {d.get('detail')}")
+    for k in ov["alerts"]:
+        print(f"  ALERT {alert_label(k)}" + (f"\n        what to do: {alert_help(k)}" if alert_help(k) else ""))
+    rows = w.query("SELECT first_seen, state, title FROM events WHERE is_test=0 ORDER BY first_seen DESC LIMIT 3")
+    for r in rows:
+        print(f"  event {r['first_seen'][:19]}Z {r['state']:<11} {r['title']}")
+    return 0 if ov["level"] == "ok" else 1
+
+
 def cmd_selftest(args) -> int:
     from .selftest import run_selftest
     print("SHERPA end-to-end self-test (mock feed + mock Shellies + mock Telegram)")
@@ -144,8 +178,14 @@ def cmd_healthcheck(args) -> int:
         age = time.time() - f.stat().st_mtime
     except OSError:
         print("no health file"); return 1
-    print(f"poll loop last alive {age:.0f}s ago")
-    return 0 if age < args.max_age else 1
+    limit = args.max_age
+    try:  # a slow poll interval (set in the web UI) must not make a healthy service look unhealthy
+        interval = float(json.loads((f.parent / "status.json").read_text())["poll_interval_s"])
+        limit = max(limit, 3 * interval + 10)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    print(f"poll loop last alive {age:.0f}s ago (limit {limit:.0f}s)")
+    return 0 if age < limit else 1
 
 
 def cmd_web(args) -> int:
@@ -209,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     add("check", cmd_check, "read-only preflight: fetch the real feed, probe Shellies")
     sp = add("lag", cmd_lag, "show first-seen vs pubDate lag statistics")
     sp.add_argument("-n", type=int, default=15)
+    add("status", cmd_status, "one-screen summary of the running service (same rules as the dashboard)")
     add("selftest", cmd_selftest, "end-to-end self-test against mocks", config=False)
     sp = add("healthcheck", cmd_healthcheck, "exit 1 if the poll loop is stale", config=False)
     sp.add_argument("--file", default="/data/health")

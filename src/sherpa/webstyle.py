@@ -1,12 +1,21 @@
 """Stylesheet, icons and favicon for the web UI. No inline styles anywhere (the CSP forbids them)."""
 import hashlib
 
-FAVICON = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-    '<rect width="32" height="32" rx="8" fill="#1d4ed8"/>'
-    '<path d="M5 24 13 10l4.5 7.5L20 14l7 10Z" fill="#fff"/>'
-    '<circle cx="24.5" cy="8" r="2.8" fill="#f59e0b"/></svg>'
-)
+_DOT = {"ok": "#22c55e", "warn": "#f59e0b", "bad": "#ef4444", "unknown": "#94a3b8"}
+
+
+def favicon(level: str = "") -> str:
+    """The logo; with a level, its dot shows the service state (visible in a background tab)."""
+    if level in _DOT:
+        dot = (f'<circle cx="24" cy="8" r="7" fill="{_DOT[level]}" stroke="#fff" stroke-width="2"/>')
+    else:
+        dot = '<circle cx="24.5" cy="8" r="2.8" fill="#f59e0b"/>'
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+            '<rect width="32" height="32" rx="8" fill="#1d4ed8"/>'
+            f'<path d="M5 24 13 10l4.5 7.5L20 14l7 10Z" fill="#fff"/>{dot}</svg>')
+
+
+FAVICON = favicon()
 
 LOGO = (
     '<svg class="logo" viewBox="0 0 32 32" aria-hidden="true">'
@@ -102,11 +111,20 @@ footer{max-width:1180px;margin:0 auto;padding:0 20px 28px;color:var(--faint);fon
 .hero h1{font-size:20px}.hero p{margin:3px 0 0;color:var(--text);opacity:.85}
 .hero.ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok)}
 .hero.bad{background:var(--bad-bg);border-color:var(--bad-line);color:var(--bad)}
+.hero.warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn)}
 .hero.unknown{background:var(--surface-2);border-color:var(--line-2);color:var(--muted)}
 .hero .body{flex:1;min-width:0}
 .alert-list{margin:12px 0 0;padding:0;list-style:none;display:grid;gap:8px}
 .alert-list li{background:var(--surface);color:var(--text);border:1px solid var(--bad-line);border-radius:8px;padding:9px 12px;font-size:14px}
-.alert-list b{display:block;color:var(--bad)}.alert-list span{color:var(--muted);font-size:13px}
+.alert-list b{display:block;color:var(--bad)}.alert-list span{display:block;color:var(--muted);font-size:13px}
+.alert-list .todo{color:var(--text);margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)}
+.alert-list .todo b{display:inline;color:var(--text)}
+.card.attention{border-color:var(--bad-line)}
+.help p,.help li{max-width:75ch}.help ol{margin:0;padding-left:20px}.help li{margin:4px 0}
+.pager{display:flex;justify-content:space-between;gap:12px;padding:12px 18px;border-top:1px solid var(--line);font-size:14px}
+.skip{position:absolute;left:-9999px;top:8px;z-index:20;background:var(--surface);padding:8px 12px;border-radius:8px}
+.skip:focus{left:8px}
+footer a{color:var(--muted);text-decoration:underline}
 
 /* ---------- KPI tiles ---------- */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
@@ -187,6 +205,9 @@ td.det{max-width:360px;color:var(--muted);overflow-wrap:anywhere}
 .fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px 20px}
 .field label{display:block;font-size:13px;font-weight:600;margin-bottom:5px}
 .field .hint{font-size:12px;color:var(--muted);margin-top:5px}
+.field.invalid input{border-color:var(--bad);box-shadow:0 0 0 3px var(--bad-bg)}
+.field.invalid label{color:var(--bad)}
+.ferr{font-size:12.5px;font-weight:600;color:var(--bad);margin-top:5px}
 input[type=text],input[type=password],select{font:inherit;width:100%;padding:8px 11px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--text);min-height:38px}
 input:hover,select:hover{border-color:var(--faint)}
 input:focus,select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--ring)}

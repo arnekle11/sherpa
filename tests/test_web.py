@@ -77,8 +77,10 @@ def test_filters_favicon_and_security_headers(site):
         assert "Požar" in c.get(base + "/events?f=delivered").text
         assert "Požar" not in c.get(base + "/events?f=problems").text
         assert "Požar" in c.get(base + "/events?f=nonsense").text  # unknown filter falls back to all
-        assert "UNREACHABLE" not in c.get(base + "/alerts?f=info").text
-        assert "UNREACHABLE" in c.get(base + "/alerts?f=raised").text
+        info = c.get(base + "/alerts?f=info").text
+        assert "Active now" in info and "What to do" in info  # active alerts are always summarised on top
+        assert 'badge bad">Raised' not in info                 # ... but the filtered history holds no raise rows
+        assert 'badge bad">Raised' in c.get(base + "/alerts?f=raised").text
         assert c.get(base + "/alerts?f=raised").status_code == 200
         r = c.get(base + "/favicon.svg")
         assert r.status_code == 200 and r.headers["content-type"] == "image/svg+xml"

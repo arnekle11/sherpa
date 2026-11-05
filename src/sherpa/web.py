@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import threading
 import logging
 import secrets
 import sqlite3
@@ -21,7 +22,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from . import __version__, commands, settings, webexport, webpages, webstats
 from .config import AppCfg, load_config
-from .webstyle import CSS, FAVICON
+from .webstyle import CSS, favicon
 
 log = logging.getLogger("sherpa.web")
 
@@ -52,6 +53,7 @@ class Web:
         self.password = password or None
         self.sessions: dict[str, dict] = {}
         self.fails: dict[str, list[float]] = {}
+        self._lock = threading.Lock()  # the server is threaded; these dicts are shared
         cfg = load_config(config_path)
         self.db_path = Path(cfg.db_path)
         self.status_path = self.db_path.parent / "status.json"
@@ -107,32 +109,42 @@ class Web:
     # ---- auth ----
     def new_session(self) -> tuple[str, dict]:
         now = time.monotonic()
-        self.sessions = {k: v for k, v in self.sessions.items() if now - v["seen"] < SESSION_IDLE_S}
         tok = secrets.token_urlsafe(32)
-        self.sessions[tok] = {"csrf": secrets.token_urlsafe(24), "seen": now}
-        return tok, self.sessions[tok]
+        with self._lock:
+            for k in [k for k, v in self.sessions.items() if now - v["seen"] >= SESSION_IDLE_S]:
+                del self.sessions[k]
+            self.sessions[tok] = {"csrf": secrets.token_urlsafe(24), "seen": now}
+            return tok, self.sessions[tok]
 
     def session(self, token: str | None) -> dict | None:
-        s = self.sessions.get(token or "")
-        if s and time.monotonic() - s["seen"] < SESSION_IDLE_S:
-            s["seen"] = time.monotonic()
-            return s
-        self.sessions.pop(token or "", None)
-        return None
+        with self._lock:
+            s = self.sessions.get(token or "")
+            if s and time.monotonic() - s["seen"] < SESSION_IDLE_S:
+                s["seen"] = time.monotonic()  # idle timeout: activity keeps the session alive
+                return s
+            self.sessions.pop(token or "", None)
+            return None
+
+    def end_session(self, token: str | None) -> None:
+        with self._lock:
+            self.sessions.pop(token or "", None)
 
     def locked_out(self, ip: str) -> bool:
         now = time.monotonic()
-        recent = [t for t in self.fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
-        self.fails[ip] = recent
-        return len(recent) >= LOGIN_MAX_FAILS
+        with self._lock:
+            for k in [k for k, v in self.fails.items() if not v or now - v[-1] >= LOGIN_WINDOW_S]:
+                del self.fails[k]  # also keeps the table small
+            return len([t for t in self.fails.get(ip, []) if now - t < LOGIN_WINDOW_S]) >= LOGIN_MAX_FAILS
 
     def check_password(self, ip: str, given: str) -> bool:
         if self.password is None or self.locked_out(ip):
             return False
         if hmac.compare_digest(given.encode(), self.password.encode()):
-            self.fails.pop(ip, None)
+            with self._lock:
+                self.fails.pop(ip, None)
             return True
-        self.fails.setdefault(ip, []).append(time.monotonic())
+        with self._lock:
+            self.fails.setdefault(ip, []).append(time.monotonic())
         time.sleep(1)  # slow down guessing
         return False
 
@@ -200,13 +212,15 @@ def make_handler(w: Web):
                 if path == "/static.css":
                     self._send(200, CSS, "text/css; charset=utf-8", {"Cache-Control": "public, max-age=31536000, immutable"})
                 elif path == "/favicon.svg":
-                    self._send(200, FAVICON, "image/svg+xml", {"Cache-Control": "max-age=86400"})
+                    self._send(200, favicon(q.get("s", "")), "image/svg+xml", {"Cache-Control": "max-age=86400"})
                 elif path == "/favicon.ico":
                     self._send(204, "")
                 elif path == "/healthz":
                     self._send(200, "ok", "text/plain")
                 elif path == "/":
-                    self._send(200, webpages.dashboard(w, bool(sess)))
+                    self._send(200, webpages.dashboard(w, bool(sess), q))
+                elif path == "/help":
+                    self._send(200, webpages.help_page(w, bool(sess)))
                 elif path == "/events":
                     self._send(200, webpages.events_page(w, bool(sess), q))
                 elif path == "/alerts":
@@ -249,9 +263,9 @@ def make_handler(w: Web):
                         return self._send(401, webpages.login_page(w, "Wrong password."))
                     tok, _ = w.new_session()
                     log.info("login from %s", ip)
-                    return self._redirect("/settings", {"Set-Cookie": f"sid={tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_IDLE_S}"})
+                    return self._redirect("/settings", {"Set-Cookie": f"sid={tok}; HttpOnly; SameSite=Strict; Path=/"})
                 if path == "/logout":
-                    w.sessions.pop(self._cookie() or "", None)  # harmless to force, so no CSRF token needed
+                    w.end_session(self._cookie())  # harmless to force, so no CSRF token needed
                     return self._redirect("/", {"Set-Cookie": "sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"})
                 if path == "/settings":
                     if sess is None:

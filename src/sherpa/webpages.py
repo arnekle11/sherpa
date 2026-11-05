@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import re
 import time
+from urllib.parse import urlencode
 from datetime import UTC, datetime, timedelta
 
 from . import __version__, settings
@@ -22,6 +23,32 @@ ALERT_LABELS = {
     "feed-link": "Feed filter changed", "internal": "Internal error", "dispatch": "Dispatch error",
     "config-invalid": "Settings file invalid",
 }
+# What to do, per alert. Plain words for whoever is looking at the dashboard during a callout.
+ALERT_HELP = {
+    "feed-down": "The VM cannot get the SOS 112 feed. Check the VM's internet connection and whether "
+                 "https://spin3.sos112.si opens in a browser. While this lasts, new emergencies will NOT switch the LED.",
+    "feed-structure": "The feed answered with something SHERPA does not recognise (a format change or an error page). "
+                      "Open the feed URL in a browser. If the format changed, the parser needs an update.",
+    "feed-link": "The feed's self-link no longer contains the expected filter. The operator may have changed the filter, "
+                 "so events could be missing or wrong. Compare the feed URL with the self-link canary under Settings.",
+    "offline": "SHERPA cannot reach this Shelly. Check its power and Wi-Fi, and that its address under Settings is still "
+               "right (a router may have given it a new IP). It will NOT light up on an emergency until this clears.",
+    "activate": "The Shelly did not confirm ON with its auto-off timer. Check the device, then run a test event under "
+                "Settings to confirm it works again.",
+    "config-invalid": "config.yaml was edited by hand and is invalid; SHERPA keeps running the previous settings. "
+                      "Fix the file, or save the settings again here.",
+    "internal": "Unexpected error in the poll loop. Look at `docker compose logs sherpa`; if it keeps happening, "
+                "`docker compose restart sherpa`.",
+    "dispatch": "Switching the devices crashed. Look at `docker compose logs sherpa`.",
+}
+
+
+def alert_help(key: str | None) -> str:
+    if not key:
+        return ""
+    return ALERT_HELP.get(key.split(":", 1)[0], "")
+
+
 STATE_BADGE = {
     "triggered": ("ok", "Delivered"), "partial": ("warn", "Partly delivered"), "failed": ("bad", "Failed"),
     "pending": ("warn", "Pending"), "abandoned": ("bad", "Abandoned"), "ignored_old": ("mute", "Ignored (old)"),
@@ -106,11 +133,29 @@ def overview(w) -> dict:
     age = time.time() - st["written"]
     if age > STALE_STATUS_S:
         return {"level": "bad", "pill": "Service down", "st": st, "age": age, "down": True, "alerts": []}
+    lp = st.get("last_poll_age_s")
+    if lp is not None and lp > poll_stall_limit(st):
+        return {"level": "bad", "pill": "Polling stopped", "st": st, "stalled": lp, "alerts": st.get("active_alerts", [])}
     alerts = st.get("active_alerts", [])
     if alerts:
         n = len(alerts)
         return {"level": "bad", "pill": f"{n} alert{'s' if n != 1 else ''}", "st": st, "alerts": alerts}
+    if not_notifying(st):
+        return {"level": "warn", "pill": "Not notifying", "st": st, "alerts": []}
     return {"level": "ok", "pill": "Operational", "st": st, "alerts": []}
+
+
+def poll_stall_limit(st: dict) -> float:
+    return max(30.0, 3 * float(st.get("poll_interval_s", 2)) + 10)
+
+
+def not_notifying(st: dict) -> str | None:
+    """Why nobody would hear about a problem, or None."""
+    if st.get("telegram_configured") is False:
+        return "not_configured"
+    if st.get("telegram_configured") and (st.get("telegram_delivery") or {}).get("ok") is False:
+        return "failing"
+    return None
 
 
 def layout(w, title: str, body: str, active: str, user: bool, refresh: int = 0, ov: dict | None = None) -> str:
@@ -119,17 +164,23 @@ def layout(w, title: str, body: str, active: str, user: bool, refresh: int = 0, 
     who = ('<form method="post" action="/logout" class="inline"><button class="btn ghost sm" type="submit">Log out</button></form>'
            if user else '<a class="btn ghost sm" href="/login">Log in</a>')
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    # A tab left open on a wall screen shows the state in its title and icon.
+    prefix = {"bad": f"● {ov['pill']} · ", "warn": f"▲ {ov['pill']} · "}.get(ov["level"], "")
+    tz = datetime.now().astimezone().tzname() or "server time"
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'{meta}<title>{_e(title)} · SHERPA</title>'
-        f'<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static.css?v={CSS_VERSION}"></head><body>'
+        f'{meta}<title>{_e(prefix)}{_e(title)} · SHERPA</title>'
+        f'<link rel="icon" href="/favicon.svg?s={ov["level"]}" type="image/svg+xml">'
+        f'<link rel="stylesheet" href="/static.css?v={CSS_VERSION}"></head><body>'
+        '<a class="skip" href="#main">Skip to content</a>'
         '<div class="topbar"><div class="topbar-in">'
         f'<a class="brand" href="/">{LOGO}<span>SHERPA<small>SOS 112 alerting</small></span></a>'
         f'<nav class="nav" aria-label="Main">{nav}</nav>'
         f'<div class="top-right"><span class="pill {ov["level"]}" title="Service status"><i></i>{_e(ov["pill"])}</span>{who}</div>'
-        f'</div></div><main class="wrap">{body}</main>'
-        f'<footer><span>SHERPA v{_e(__version__)}</span><span>Times shown in the server time zone</span>'
+        f'</div></div><main class="wrap" id="main">{body}</main>'
+        f'<footer><span>SHERPA v{_e(__version__)}</span><span>Times in {_e(tz)} (server time zone)</span>'
+        '<a href="/help">Help: what the alerts mean</a>'
         '<span>The public feed must not be the only alert path.</span></footer></body></html>'
     )
 
@@ -150,7 +201,9 @@ def _active_alert_items(w, keys: list[str]) -> str:
                      "AND id IN (SELECT MAX(id) FROM alert_log WHERE key IS NOT NULL GROUP BY key)"):
         latest[r["key"]] = clean(r["text"])
     items = "".join(
-        f'<li><b>{_e(alert_label(k))}</b><span>{_e(latest.get(k, "No details recorded."))}</span></li>' for k in keys)
+        f'<li><b>{_e(alert_label(k))}</b><span>{_e(latest.get(k, "No details recorded."))}</span>'
+        + (f'<span class="todo"><b>What to do:</b> {_e(alert_help(k))}</span>' if alert_help(k) else "")
+        + "</li>" for k in keys)
     return f'<ul class="alert-list">{items}</ul>'
 
 
@@ -164,12 +217,28 @@ def hero(w, ov: dict) -> str:
         return ('<section class="hero bad">' + icon("down") + f'<div class="body"><h1>Service not responding</h1>'
                 f'<p>Last status {ago(ov["age"])}. New emergencies will <b>not</b> switch the LED while the service is down.</p>'
                 "</div></section>")
+    if ov.get("stalled") is not None:
+        return ('<section class="hero bad">' + icon("down") + '<div class="body"><h1>Polling has stopped</h1>'
+                f'<p>The service is running but has not finished a feed poll for {dur(ov["stalled"])}. New emergencies '
+                "will <b>not</b> switch the LED. Restart it: <code>docker compose restart sherpa</code>.</p>"
+                + (_active_alert_items(w, ov["alerts"]) if ov["alerts"] else "") + "</div></section>")
     if ov["alerts"]:
         n = len(ov["alerts"])
         return ('<section class="hero bad">' + icon("alert") + f'<div class="body"><h1>{n} active alert{"s" if n != 1 else ""}</h1>'
                 "<p>Something needs attention. The Alerts page has the full history.</p>"
                 + _active_alert_items(w, ov["alerts"]) + "</div></section>")
     devs = list(st["devices"].values())
+    if ov["level"] == "warn":
+        why = not_notifying(st)
+        tdel = st.get("telegram_delivery") or {}
+        text = (("Telegram is not configured, so nobody hears about outages or failed devices. Put "
+                 "<code>SHERPA_TELEGRAM_TOKEN</code> and <code>SHERPA_TELEGRAM_CHAT_ID</code> in <code>.env</code>, "
+                 "then run <code>docker compose up -d</code>.") if why == "not_configured" else
+                (f"Telegram messages are failing ({_e(str(tdel.get('error') or 'unknown error'))})"
+                 + (f"; {n} message{'s' if n != 1 else ''} given up since the last start" if (n := tdel.get('undelivered', 0)) else "")
+                 + ", so problems reach nobody. Check the bot token and chat id in <code>.env</code>."))
+        return ('<section class="hero warn">' + icon("alert") + '<div class="body"><h1>Running, but nobody is notified</h1>'
+                f"<p>Polling and the LEDs work. {text}</p></div></section>")
     checked = [d for d in devs if d["ok"] is not None]
     dev_txt = (f'{sum(1 for d in checked if d["ok"])} of {len(devs)} devices reachable' if checked
                else "devices not checked yet")
@@ -231,15 +300,17 @@ def lag_card(w) -> str:
     return f'<section class="card">{head}<div class="card-b">{lag_chart(rows)}{summary}</div></section>'
 
 
-def notices(st: dict) -> str:
+def notices(st: dict, hero_covers_telegram: bool = False) -> str:
     out = []
-    if not st.get("telegram_configured", True):
+    if hero_covers_telegram:
+        pass
+    elif not st.get("telegram_configured", True):
         out.append('<div class="notice warn">' + icon("alert") + '<div class="txt"><b>Telegram is not configured.</b> '
                    "Alerts are only logged and shown here; nobody is notified when something breaks. Put "
                    "<code>SHERPA_TELEGRAM_TOKEN</code> and <code>SHERPA_TELEGRAM_CHAT_ID</code> in <code>.env</code>, "
                    "then run <code>docker compose up -d</code>.</div></div>")
     tdel = st.get("telegram_delivery") or {}
-    if st.get("telegram_configured") and tdel.get("ok") is False:
+    if st.get("telegram_configured") and tdel.get("ok") is False and not hero_covers_telegram:
         n = tdel.get("undelivered", 0)
         out.append('<div class="notice bad">' + icon("alert") + '<div class="txt"><b>Telegram messages are failing to send.</b> '
                    f'Alerts are NOT reaching you right now ({_e(str(tdel.get("error") or "unknown error"))})'
@@ -378,11 +449,13 @@ def alert_paths_card(w, st: dict) -> str:
             "Telegram alerts from this service cannot.</p></div></section>")
 
 
-def dashboard(w, user: bool) -> str:
+def dashboard(w, user: bool, q: dict | None = None) -> str:
     ov = overview(w)
     st = ov["st"]
-    out = [page_head("Dashboard", "Live view of the poller and the Shelly devices.",
-                     '<span class="small mute">Refreshes every 10 s</span>'), hero(w, ov)]
+    paused = (q or {}).get("refresh") == "0"
+    ctl = ('<span class="small mute">Auto-refresh paused · <a href="/">Resume</a></span>' if paused else
+           '<span class="small mute">Refreshes every 10 s · <a href="/?refresh=0">Pause</a></span>')
+    out = [page_head("Dashboard", "Live view of the poller and the Shelly devices.", ctl), hero(w, ov)]
     if st and not ov.get("down"):
         cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
         r = w.query("SELECT COUNT(*) AS n, SUM(state IN ('failed','partial','abandoned')) AS bad FROM events "
@@ -397,7 +470,7 @@ def dashboard(w, user: bool) -> str:
                           "bad" if bad else "")
                    + tile("Uptime", dur(st["uptime_s"]), "since last start") + "</div>")
     if st is not None:
-        out.insert(2, notices(st))
+        out.insert(2, notices(st, hero_covers_telegram=ov["level"] == "warn"))
         out.append(feed_health_card(w, st))
         out.append('<section class="card"><div class="card-h"><h2>Shelly devices</h2>'
                    '<span class="meta">read-only checks, nothing is switched</span></div>'
@@ -406,7 +479,7 @@ def dashboard(w, user: bool) -> str:
     out.append(f'<div class="cols">{lag_card(w)}'
                '<section class="card"><div class="card-h"><h2>Latest events</h2><a class="meta" href="/events">View all</a></div>'
                f'<div class="card-b flush">{events_table(w.query("SELECT * FROM events ORDER BY first_seen DESC LIMIT 6"), compact=True)}</div></section></div>')
-    return layout(w, "Dashboard", "".join(out), "dashboard", user, refresh=10, ov=ov)
+    return layout(w, "Dashboard", "".join(out), "dashboard", user, refresh=0 if paused else 10, ov=ov)
 
 
 # ------------------------------------------------------------------ events
@@ -456,22 +529,53 @@ def chips(base: str, options: dict, current: str) -> str:
         for k, v in options.items()) + "</div>"
 
 
+PAGE = 100
+
+
+def pager(path: str, f: str, before: str | None, rows: list, key: str) -> str:
+    """'Older' link when the page is full; 'Newest' when not on the first page. Keyset paging, no OFFSET."""
+    links = []
+    if before:
+        links.append(f'<a href="{path}{"?f=" + f if f != "all" else ""}">← Newest</a>')
+    if len(rows) == PAGE:
+        qs = urlencode({**({"f": f} if f != "all" else {}), "before": rows[-1][key]})
+        links.append(f'<a href="{path}?{_e(qs)}">Older →</a>')
+    return f'<div class="pager">{" ".join(links)}</div>' if links else ""
+
+
 def events_page(w, user: bool, q: dict) -> str:
     f = q.get("f", "all")
     f = f if f in EVENT_FILTERS else "all"
-    rows = w.query(f"SELECT * FROM events WHERE {EVENT_FILTERS[f][1]} ORDER BY first_seen DESC LIMIT 200")
-    body = (page_head("Events", "Every new item seen in the feed, and what happened to it.") + chips("/events", EVENT_FILTERS, f)
+    before = q.get("before") if _dt(q.get("before")) else None
+    rows = w.query(f"SELECT * FROM events WHERE {EVENT_FILTERS[f][1]}" + (" AND first_seen < ?" if before else "")
+                   + f" ORDER BY first_seen DESC LIMIT {PAGE}", (before,) if before else ())
+    meta = f"{len(rows)} {'older ' if before else 'latest, '}newest first" if rows else ""
+    body = (page_head("Events", "Every new item seen in the feed, and what happened to it.",
+                      '<a class="btn ghost sm" href="/events.csv">Download CSV</a>') + chips("/events", EVENT_FILTERS, f)
             + f'<section class="card"><div class="card-h"><h2>{"All events" if f == "all" else _e(EVENT_FILTERS[f][0])}</h2>'
-              f'<span class="meta">latest {len(rows)}, newest first</span></div>'
-              f'<div class="card-b flush">{events_table(rows)}</div></section>')
+              f'<span class="meta">{meta}</span></div>'
+              f'<div class="card-b flush">{events_table(rows)}</div>{pager("/events", f, before, rows, "first_seen")}</section>')
     return layout(w, "Events", body, "events", user)
 
 
 # ------------------------------------------------------------------ alerts
+def active_now_card(w) -> str:
+    st = w.status() or {}
+    keys = st.get("active_alerts") or []
+    if not keys or time.time() - st.get("written", 0) > STALE_STATUS_S:
+        return ""
+    return ('<section class="card attention"><div class="card-h"><h2>Active now</h2>'
+            f'<span class="meta">{len(keys)} condition{"s" if len(keys) != 1 else ""}</span></div>'
+            f'<div class="card-b">{_active_alert_items(w, keys)}</div></section>')
+
+
 def alerts_page(w, user: bool, q: dict) -> str:
     f = q.get("f", "all")
     f = f if f in ALERT_FILTERS else "all"
-    rows = w.query(f"SELECT * FROM alert_log WHERE {ALERT_FILTERS[f][1]} ORDER BY id DESC LIMIT 200")
+    before = q.get("before", "")
+    before = int(before) if before.isdigit() else None
+    rows = w.query(f"SELECT * FROM alert_log WHERE {ALERT_FILTERS[f][1]}" + (" AND id < ?" if before else "")
+                   + f" ORDER BY id DESC LIMIT {PAGE}", (before,) if before else ())
     kinds = {"raise": ("bad", "Raised"), "repeat": ("warn", "Still active"), "clear": ("ok", "Cleared"), "info": ("info", "Info"),
              "undelivered": ("bad", "Not delivered")}
     if rows:
@@ -482,10 +586,12 @@ def alerts_page(w, user: bool, q: dict) -> str:
                  f'</tr></thead><tbody>{body_rows}</tbody></table></div>')
     else:
         table = empty("No alerts recorded", "Alerts appear here when something fails, recovers, or the service starts.")
+    meta = f"{len(rows)} {'older ' if before else 'latest, '}newest first" if rows else ""
     body = (page_head("Alerts", "Alerts raised and cleared, plus start-up notices. Telegram gets the same messages when it is configured.")
-            + chips("/alerts", ALERT_FILTERS, f)
+            + (active_now_card(w) if not before else "") + chips("/alerts", ALERT_FILTERS, f)
             + f'<section class="card"><div class="card-h"><h2>{"All alerts" if f == "all" else _e(ALERT_FILTERS[f][0])}</h2>'
-              f'<span class="meta">latest {len(rows)}, newest first</span></div><div class="card-b flush">{table}</div></section>')
+              f'<span class="meta">{meta}</span></div><div class="card-b flush">{table}</div>'
+              f'{pager("/alerts", f, str(before) if before else None, rows, "id")}</section>')
     return layout(w, "Alerts", body, "alerts", user)
 
 
@@ -516,14 +622,18 @@ DEV_LABELS = {
 DEV_UNITS = {"on_duration_s": "s", "timeout_s": "s", "retry_delay_s": "s"}
 
 
-def _field(fid: str, label: str, value, hint: str = "", unit: str = "") -> str:
-    inp = f'<input type="text" id="{_e(fid)}" name="{_e(fid)}" value="{_e(str(value))}" inputmode="decimal" autocomplete="off">'
+def _field(fid: str, label: str, value, hint: str = "", unit: str = "", err: str | None = None) -> str:
+    bad = f' aria-invalid="true" aria-describedby="{_e(fid)}-err"' if err else ""
+    inp = (f'<input type="text" id="{_e(fid)}" name="{_e(fid)}" value="{_e(str(value))}" inputmode="decimal" '
+           f'autocomplete="off"{bad}>')
     box = f'<div class="ig">{inp}<span class="u">{_e(unit)}</span></div>' if unit else inp
     h = f'<div class="hint">{_e(hint)}</div>' if hint else ""
-    return f'<div class="field"><label for="{_e(fid)}">{_e(label)}</label>{box}{h}</div>'
+    e = f'<div class="ferr" id="{_e(fid)}-err">{_e(err)}</div>' if err else ""
+    return f'<div class="field{" invalid" if err else ""}"><label for="{_e(fid)}">{_e(label)}</label>{box}{e}{h}</div>'
 
 
-def _device_card(i: int, d: dict, is_new: bool, live: dict | None) -> str:
+def _device_card(i: int, d: dict, is_new: bool, live: dict | None, ferr: dict[str, str] | None = None) -> str:
+    ferr = ferr or {}
     fields = []
     for k in settings.DEVICE_FIELDS:
         label, hint = DEV_LABELS[k]
@@ -532,10 +642,11 @@ def _device_card(i: int, d: dict, is_new: bool, live: dict | None) -> str:
             fields.append(f'<div class="field"><label for="dev.{i}.generation">{label}</label>'
                           f'<select id="dev.{i}.generation" name="dev.{i}.generation">{opts}</select><div class="hint">{hint}</div></div>')
         else:
-            fields.append(_field(f"dev.{i}.{k}", label, d[k], hint, DEV_UNITS.get(k, "")))
+            fields.append(_field(f"dev.{i}.{k}", label, d[k], hint, DEV_UNITS.get(k, ""), ferr.get(f"dev.{i}.{k}")))
+    has_err = any(k.startswith(f"dev.{i}.") for k in ferr)
     if is_new:
         extra = f'<input type="hidden" name="dev.{i}.new" value="1">'
-        opened = " open" if str(d.get("name", "")).strip() else ""
+        opened = " open" if str(d.get("name", "")).strip() or has_err else ""
         head = f'<summary>{icon("plus")} Add a device <span class="mute small">leave the name empty to skip</span></summary>'
         cls = "devcard add"
     else:
@@ -592,13 +703,19 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
     if saved:
         out.append('<div class="notice ok">' + icon("ok") + '<div class="txt"><b>Saved.</b> The service restarts itself within a few '
                    "seconds to apply the change; Telegram will report the restart.</div></div>")
+    ferr: dict[str, str] = {}
+    for x in errors or []:
+        if getattr(x, "field", None):
+            ferr.setdefault(x.field, str(x))
     if errors:
-        out.append('<div class="notice bad">' + icon("alert") + '<div class="txt"><b>Not saved</b><ul>'
+        n = len(errors)
+        out.append('<div class="notice bad" role="alert">' + icon("alert") + f'<div class="txt"><b>Not saved: {n} '
+                   f'problem{"s" if n != 1 else ""}</b> (marked in red below)<ul>'
                    + "".join(f"<li>{_e(x)}</li>" for x in errors) + "</ul></div></div>")
 
     def section(title: str, sub: str, key: str, spec: dict) -> str:
         cur = raw[key]
-        fields = "".join(_field(f"{key}.{k}", label, f.get(f"{key}.{k}", cur[k]), hint, UNITS.get(k, ""))
+        fields = "".join(_field(f"{key}.{k}", label, f.get(f"{key}.{k}", cur[k]), hint, UNITS.get(k, ""), ferr.get(f"{key}.{k}"))
                          for k, (_t, label, hint) in spec.items())
         return (f'<section class="card"><div class="card-h"><h2>{title}</h2><span class="meta">{sub}</span></div>'
                 f'<div class="card-b"><div class="fgrid">{fields}</div></div></section>')
@@ -609,14 +726,15 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
     out.append(section("Alerting", "Telegram message timing", "alerts", settings.ALERT_FIELDS))
 
     devs = [dict(settings.DEVICE_DEFAULTS, **d.model_dump()) for d in cfg.devices]
-    if form is not None:  # re-render what the user typed
+    if form is not None:  # re-render what the user typed, under the same row numbers (errors refer to them)
         idxs = sorted({int(k.split(".")[1]) for k in form if k.startswith("dev.") and k.split(".")[1].isdigit()})
-        devs = [{k: f.get(f"dev.{i}.{k}", "") for k in settings.DEVICE_FIELDS} | {"_del": f.get(f"dev.{i}.delete"), "_new": f.get(f"dev.{i}.new")}
-                for i in idxs]
+        rows = [(i, {k: f.get(f"dev.{i}.{k}", "") for k in settings.DEVICE_FIELDS}
+                 | {"_del": f.get(f"dev.{i}.delete"), "_new": f.get(f"dev.{i}.new")}) for i in idxs]
     else:
         devs.append(dict(settings.DEVICE_DEFAULTS, _new="1"))
+        rows = list(enumerate(devs))
     live = (w.status() or {}).get("devices", {})
-    cards = "".join(_device_card(i, d, bool(d.get("_new")), live.get(str(d.get("name")))) for i, d in enumerate(devs))
+    cards = "".join(_device_card(i, d, bool(d.get("_new")), live.get(str(d.get("name"))), ferr) for i, d in rows)
     out.append('<section class="card"><div class="card-h"><h2>Shelly devices</h2>'
                '<span class="meta">on duration is a device-side timer and survives a service crash</span></div>'
                f'{cards}<div class="card-b"></div></section>')
@@ -631,6 +749,38 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
                '<span class="mute">Applying restarts the poller for about a second; the device timers keep running.</span></div></form>')
     out.append(tools_card(w, sess, tool_msg))  # after </form>: it has its own forms, and HTML forms cannot be nested
     return layout(w, "Settings", "".join(out), "settings", True)
+
+
+def help_page(w, user: bool) -> str:
+    rows = "".join(
+        f'<tr><td class="nowrap"><b>{_e(label)}</b></td><td>{_e(ALERT_HELP[key])}</td></tr>'
+        for key, label in (("feed-down", "Feed unreachable"), ("feed-structure", "Feed structure changed"),
+                           ("feed-link", "Feed filter changed"), ("offline", "<device> unreachable"),
+                           ("activate", "<device> did not switch on"), ("config-invalid", "Settings file invalid"),
+                           ("internal", "Internal error"), ("dispatch", "Dispatch error")))
+    states = "".join(f'<tr><td>{badge(k, v)}</td><td>{_e(t)}</td></tr>' for k, v, t in (
+        ("ok", "Delivered", "every device confirmed ON with its auto-off timer"),
+        ("warn", "Partly delivered", "some devices confirmed, others did not (see the detail column)"),
+        ("bad", "Failed", "no device confirmed ON"),
+        ("mute", "Ignored (old)", "already in the feed when SHERPA started and older than the startup max-age"),
+        ("bad", "Abandoned", "recorded but not dispatched before a restart and then too old, or an interrupted test")))
+    body = (page_head("Help", "What SHERPA shows, and what to do when something is wrong.")
+            + '<section class="card"><div class="card-h"><h2>How it works</h2></div><div class="card-b help">'
+              "<p>SHERPA polls the public SOS 112 feed every few seconds. Every item that appears in it is an emergency "
+              "for this area: SHERPA switches every Shelly ON with an auto-off timer kept by the device itself, so the "
+              "LED turns off on its own even if SHERPA stops. Problems are sent to Telegram and shown here.</p>"
+              "<p><b>The public feed must not be the only alert path.</b> If it is late or down, SHERPA cannot know about "
+              "an emergency.</p></div></section>"
+            + '<section class="card"><div class="card-h"><h2>Alerts and what to do</h2></div><div class="card-b flush">'
+              f'<div class="scroll"><table><tbody>{rows}</tbody></table></div></div></section>'
+            + '<section class="card"><div class="card-h"><h2>Event results</h2></div><div class="card-b flush">'
+              f'<div class="scroll"><table><tbody>{states}</tbody></table></div></div></section>'
+            + '<section class="card"><div class="card-h"><h2>Checking everything end to end</h2></div><div class="card-b help"><ol>'
+              "<li>Settings → Maintenance tools → <b>Send test message</b>: the message must arrive in Telegram.</li>"
+              "<li>Settings → Maintenance tools → <b>Run test event</b> (10 s): every LED must light and turn itself off.</li>"
+              "<li>Dashboard: every device <b>reachable</b>, feed health green, no active alerts.</li>"
+              "<li>With a dead-man's switch configured: its monitor must show recent pings.</li></ol></div></section>")
+    return layout(w, "Help", body, "", user)
 
 
 def not_found(w, user: bool) -> str:
