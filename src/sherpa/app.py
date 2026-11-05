@@ -11,9 +11,11 @@ from pathlib import Path
 
 from . import __version__
 from .alerts import AlertManager, LogNotifier, Notifier, TelegramNotifier
-from .config import AppCfg, load_config, telegram_from_env
+from .config import AppCfg, deadman_url_from_env, describe_changes, load_config, telegram_from_env
+from .deadman import Deadman
 from .devices import make_device, make_device_client
 from .dispatcher import Dispatcher
+from .pollstats import PollStats
 from .feed import FeedFetcher, FeedFormatError, FeedItem, FetchError, parse_feed
 from .store import Store
 
@@ -30,7 +32,7 @@ def build_notifier(cfg: AppCfg, telegram=_ENV) -> Notifier:
 
 
 class App:
-    def __init__(self, cfg: AppCfg, telegram=_ENV, config_path: str | None = None):
+    def __init__(self, cfg: AppCfg, telegram=_ENV, config_path: str | None = None, deadman=_ENV):
         self.cfg = cfg
         self.config_path = config_path  # set => watched; a valid change restarts the service to apply it
         self.restart_requested = False
@@ -52,6 +54,11 @@ class App:
         self._status_written = 0.0
         self.device_status: dict[str, dict] = {}
         self.config_poll_s = 5.0
+        self.pollstats = PollStats()
+        self.last_items: list[dict] = []  # what the feed currently contains, for the web UI
+        self._last_poll_done = time.monotonic()
+        url = deadman_url_from_env() if deadman is _ENV else deadman
+        self.deadman = Deadman(url, cfg.alerts.deadman_interval_s, self._poll_healthy) if url else None
         # counters (also used by selftest)
         self.polls_ok = self.polls_failed = self.polls_skipped = 0
         self.events_triggered = 0
@@ -72,7 +79,10 @@ class App:
                  asyncio.create_task(self._device_probe_loop(), name="probe"),
                  asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
                  asyncio.create_task(self._summary_loop(), name="summary"),
-                 asyncio.create_task(self._config_watch_loop(), name="config-watch")]
+                 asyncio.create_task(self._config_watch_loop(), name="config-watch"),
+                 asyncio.create_task(self._stats_loop(), name="poll-stats")]
+        if self.deadman:
+            loops.append(asyncio.create_task(self.deadman.run(), name="deadman"))
         try:
             await self._stop.wait()
         finally:
@@ -81,11 +91,14 @@ class App:
             await asyncio.gather(*loops, return_exceptions=True)
             if self._tasks:  # let in-flight activations finish: they are the whole point
                 await asyncio.wait(self._tasks, timeout=15)
+            self._flush_stats()
             await self.alerts.drain()
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
             await self.fetcher.aclose()
             await self._dev_client.aclose()
+            if self.deadman:
+                await self.deadman.aclose()
             if hasattr(self.notifier, "aclose"):
                 await self.notifier.aclose()
             self.store.close()
@@ -116,12 +129,14 @@ class App:
         next_tick = loop.time()
         while not self._stop.is_set():
             await self.poll_once()
+            self._last_poll_done = time.monotonic()
             self._touch_health()
             next_tick += interval
             now = loop.time()
             if next_tick <= now:  # slow poll: skip ticks, never queue or overlap
                 missed = int((now - next_tick) // interval) + 1
                 self.polls_skipped += missed
+                self.pollstats.skipped(missed)
                 next_tick += missed * interval
             try:
                 await asyncio.wait_for(self._stop.wait(), max(0.0, next_tick - loop.time()))
@@ -139,10 +154,12 @@ class App:
 
     async def _poll(self) -> None:
         fc = self.cfg.feed
+        t0 = time.monotonic()
         try:
             body = await self.fetcher.fetch()
         except FetchError as e:
             self.polls_failed += 1
+            self.pollstats.record(False, None)
             log.warning("feed fetch failed: %s", e)
             down_for = time.monotonic() - self._last_http_ok
             if down_for >= fc.down_after_s:
@@ -150,16 +167,21 @@ class App:
                                                 f"New emergencies will NOT trigger the LED.")
             return
         self._last_http_ok = time.monotonic()
+        latency = self._last_http_ok - t0
         self.alerts.clear("feed-down", "feed reachable again")
 
         try:
             parsed = parse_feed(body)
         except FeedFormatError as e:
             self.polls_failed += 1
+            self.pollstats.record(False, latency)
             log.error("feed format error: %s", e)
             self.alerts.raise_("feed-structure", f"feed structure CHANGED / invalid: {e}")
             return
         self.polls_ok += 1
+        self.pollstats.record(True, latency)
+        self.last_items = [{"title": it.title, "pub": it.pub_date.isoformat(timespec="seconds") if it.pub_date else None}
+                           for it in parsed.items[:30]]
 
         if not self._logged_link:
             self._logged_link = True
@@ -223,9 +245,10 @@ class App:
         every = self.cfg.alerts.device_check_interval_s
         if not every:
             return
+        await asyncio.sleep(3)  # first look right after start, so a dead device is visible at once
         while True:
-            await asyncio.sleep(every)
             await self.probe_devices()
+            await asyncio.sleep(every)
 
     async def probe_devices(self) -> dict[str, str]:
         """Read-only reachability check (never switches anything)."""
@@ -259,6 +282,25 @@ class App:
                 f"skipped={self.polls_skipped}, events={self.events_triggered}, last event: {last}; "
                 + ", ".join(f"{k}: {v}" for k, v in devs.items()))
 
+    def _poll_healthy(self) -> bool:
+        """True while the poll loop keeps completing iterations (used by the dead-man's switch)."""
+        return time.monotonic() - self._last_poll_done < max(30.0, 5 * self.cfg.feed.poll_interval_s)
+
+    def _flush_stats(self) -> None:
+        rows = self.pollstats.drain()
+        if not rows:
+            return
+        try:
+            self.store.add_poll_minutes(rows)
+        except Exception:
+            log.warning("could not write poll statistics; will retry", exc_info=True)
+            self.pollstats.requeue(rows)
+
+    async def _stats_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            self._flush_stats()
+
     async def _summary_loop(self) -> None:
         while True:
             await asyncio.sleep(300)
@@ -289,6 +331,10 @@ class App:
                 "last_event_at": self.last_event_at.isoformat(timespec="seconds") if self.last_event_at else None,
                 "feed_ok_age_s": now - self._last_http_ok,
                 "active_alerts": self.alerts.active_keys(),
+                "telegram_configured": isinstance(self.notifier, TelegramNotifier),
+                "deadman": self.deadman.snapshot() if self.deadman else {"configured": False},
+                "latency": self.pollstats.latency_summary(),
+                "feed_items": self.last_items,
                 "devices": {d.name: self.device_status.get(d.name, {"ip": d.cfg.ip, "ok": None,
                             "detail": "not probed yet", "checked": None}) for d in self.devices},
             }
@@ -324,8 +370,9 @@ class App:
                 continue
             self.alerts.clear("config-invalid", f"{path.name} is valid again")
             if new.model_dump() != self.cfg.model_dump():
-                log.warning("config changed on disk: restarting to apply it")
-                self.alerts.info("settings changed: restarting to apply them")
+                changes = "; ".join(describe_changes(self.cfg, new))
+                log.warning("config changed on disk: restarting to apply it (%s)", changes)
+                self.alerts.info(f"settings changed ({changes}): restarting to apply them"[:600])
                 self.restart_requested = True
                 self.stop()
                 return

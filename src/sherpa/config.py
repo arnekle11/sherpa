@@ -40,6 +40,7 @@ class AlertsCfg(_Base):
     heartbeat_min: float = Field(0, ge=0)
     repeat_min: float = Field(30, ge=0)
     device_check_interval_s: float = Field(300, ge=0)
+    deadman_interval_s: float = Field(60, ge=10)  # ping period when SHERPA_DEADMAN_URL is set
     telegram_api_base: str = "https://api.telegram.org"
 
 
@@ -68,3 +69,34 @@ def telegram_from_env() -> tuple[str, str] | None:
     token = os.environ.get("SHERPA_TELEGRAM_TOKEN", "").strip()
     chat = os.environ.get("SHERPA_TELEGRAM_CHAT_ID", "").strip()
     return (token, chat) if token and chat else None
+
+
+def deadman_url_from_env() -> str | None:
+    url = os.environ.get("SHERPA_DEADMAN_URL", "").strip()
+    return url if url.startswith(("http://", "https://")) else None
+
+
+def describe_changes(old: AppCfg, new: AppCfg, limit: int = 12) -> list[str]:
+    """Human-readable differences, for the 'settings changed' notice. Devices are matched by name."""
+    out: list[str] = []
+    o, n = old.model_dump(), new.model_dump()
+    for section in ("feed", "alerts"):
+        for k in n[section]:
+            if o[section].get(k) != n[section][k]:
+                out.append(f"{section}.{k}: {o[section].get(k)} -> {n[section][k]}")
+    for k in ("db_path", "log_level"):
+        if o[k] != n[k]:
+            out.append(f"{k}: {o[k]} -> {n[k]}")
+    od = {d["name"]: d for d in o["devices"]}
+    nd = {d["name"]: d for d in n["devices"]}
+    for name in nd.keys() - od.keys():
+        out.append(f"device {name} added ({nd[name]['ip']})")
+    for name in od.keys() - nd.keys():
+        out.append(f"device {name} removed")
+    for name in nd.keys() & od.keys():
+        for k, v in nd[name].items():
+            if od[name][k] != v:
+                out.append(f"device {name}: {k} {od[name][k]} -> {v}")
+    if len(out) > limit:
+        out = out[:limit] + [f"... and {len(out) - limit} more"]
+    return out

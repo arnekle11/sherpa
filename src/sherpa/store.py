@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS alert_log (
   key  TEXT,                -- alert key for raise/repeat/clear
   text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS poll_log (
+  minute  TEXT PRIMARY KEY, -- UTC, YYYY-MM-DDTHH:MM
+  ok      INTEGER NOT NULL DEFAULT 0,
+  failed  INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  lat_sum REAL NOT NULL DEFAULT 0,
+  lat_n   INTEGER NOT NULL DEFAULT 0,
+  lat_max REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -85,6 +94,23 @@ class Store:
         cutoff = _iso(datetime.now(UTC) - timedelta(days=days))
         self.db.execute("DELETE FROM events WHERE first_seen < ?", (cutoff,))
         self.db.execute("DELETE FROM alert_log WHERE ts < ?", (cutoff,))
+        self.db.execute("DELETE FROM poll_log WHERE minute < ?", (cutoff[:16],))
+
+    def add_poll_minutes(self, rows: dict[str, dict]) -> None:
+        """Additive upsert: a service restart in the middle of a minute just adds to that minute."""
+        self.db.execute("BEGIN")
+        try:
+            for minute, r in rows.items():
+                self.db.execute(
+                    "INSERT INTO poll_log(minute,ok,failed,skipped,lat_sum,lat_n,lat_max) VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(minute) DO UPDATE SET ok=ok+excluded.ok, failed=failed+excluded.failed, "
+                    "skipped=skipped+excluded.skipped, lat_sum=lat_sum+excluded.lat_sum, lat_n=lat_n+excluded.lat_n, "
+                    "lat_max=MAX(lat_max, excluded.lat_max)",
+                    (minute, r["ok"], r["failed"], r["skipped"], r["lat_sum"], r["lat_n"], r["lat_max"]))
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def log_alert(self, kind: str, key: str | None, text: str) -> None:
         self.db.execute("INSERT INTO alert_log(ts,kind,key,text) VALUES (?,?,?,?)",
