@@ -1,9 +1,10 @@
 .git
 .env
-data/
-tests/
-__pycache__/
-*.egg-info/
 .venv
 config
+data/
+docs
+tests
 .pytest_cache
+**/__pycache__
+**/*.egg-info

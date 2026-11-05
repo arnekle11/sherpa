@@ -6,12 +6,12 @@ feed:
   max_age_min: 10           # on startup, ignore items with pubDate older than this
   down_after_s: 60          # alert if no healthy HTTP response for this long
   expected_link_contains: "OD/52034"   # canary: alert if channel self-link stops containing this
-  user_agent: "SHERPA/0.1 (private first-responder notifier)"
+  user_agent: "SHERPA (private first-responder notifier)"
 
 devices:
   - name: led-bar-1
     ip: 192.168.1.50        # host or host:port
-    generation: 1           # 1 = Gen1 (Shelly 1/1PM/2.5...), 2 = Gen2/Plus/Pro
+    generation: 1           # 1 = Gen1 (Shelly 1/1PM/2.5...); 2 = Gen2 or newer (Plus, Pro, Gen3, Gen4: same RPC API)
     model: "Shelly 1"       # free-text label only
     channel: 0
     on_duration_s: 300      # device-side auto-off timer, survives app death
@@ -25,5 +25,5 @@ alerts:
   device_check_interval_s: 300   # read-only reachability probe of every Shelly (first one 3 s after start)
   deadman_interval_s: 60    # dead-man's switch ping period; only used when SHERPA_DEADMAN_URL is set
 
-db_path: data/sherpa.db
+db_path: /data/sherpa.db  # the Docker data volume; outside Docker use e.g. data/sherpa.db
 log_level: INFO
