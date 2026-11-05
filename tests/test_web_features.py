@@ -103,6 +103,7 @@ def test_api_status_and_metrics(site):
     assert j["level"] == "ok" and j["status"]["polls_ok"] == 50
     m = httpx.get(base + "/metrics").text
     assert "sherpa_up 1" in m and 'sherpa_polls_total{result="failed"} 1' in m
+    assert "sherpa_telegram_delivery_ok -1" in m  # not configured: unknown, not "ok"
     assert 'sherpa_device_up{device="led-1",address="192.168.1.50"} 1' in m
     assert 'sherpa_events_recorded{state="triggered",test="false"} 1' in m
     sp.write_text(json.dumps(_status(written=time.time() - 600)))

@@ -68,8 +68,9 @@ def metrics(w) -> str:
         m("alert_active", "gauge", "1 for each active alert condition.", [({"key": k}, 1) for k in st["active_alerts"]])
         m("telegram_configured", "gauge", "1 if Telegram alerting is configured.", [({}, int(bool(st.get("telegram_configured"))))])
         tdel = st.get("telegram_delivery") or {}
-        m("telegram_delivery_ok", "gauge", "1 last send worked, 0 failing, -1 nothing sent yet.",
-          [({}, -1 if tdel.get("ok") is None else int(bool(tdel["ok"])))])
+        known = st.get("telegram_configured") and tdel.get("ok") is not None  # log-only "delivery" proves nothing
+        m("telegram_delivery_ok", "gauge", "1 last Telegram send worked, 0 failing, -1 unknown or not configured.",
+          [({}, int(bool(tdel["ok"])) if known else -1)])
         m("alerts_undelivered_total", "counter", "Alert messages given up since the service started.",
           [({}, tdel.get("undelivered", 0))])
         devs = st.get("devices", {})
