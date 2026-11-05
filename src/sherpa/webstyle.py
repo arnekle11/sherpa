@@ -132,6 +132,7 @@ footer{max-width:1180px;margin:0 auto;padding:0 20px 28px;color:var(--faint);fon
 .feedlist li{display:flex;justify-content:space-between;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line);font-size:14px}
 .feedlist li:last-child{border-bottom:0}
 .pad{padding:8px 18px;margin:0}
+.pad-notice{margin:12px 18px 0}
 .dl{display:grid;grid-template-columns:max-content 1fr;gap:10px 18px;margin:0 0 14px;font-size:14px;align-items:center}
 .dl dt{color:var(--muted);font-weight:500}.dl dd{margin:0}
 .tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}

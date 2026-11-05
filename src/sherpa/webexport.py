@@ -9,20 +9,22 @@ import time
 from .webpages import overview
 
 CSV_FIELDS = ("first_seen", "pub_date", "lag_s", "state", "is_test", "title", "link", "detail", "guid")
+NUMERIC = {"lag_s", "is_test"}
 
 
 def _cell(v) -> str:
-    """Neutralise spreadsheet formula injection: feed text is untrusted."""
+    """Neutralise spreadsheet formula injection in text: feed text is untrusted."""
     s = "" if v is None else str(v)
     return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
 
 
 def events_csv(w) -> str:
     buf = io.StringIO()
+    buf.write("\ufeff")  # BOM: Excel otherwise mis-reads č/š/ž
     out = csv.writer(buf)
     out.writerow(CSV_FIELDS)
     for r in w.query(f"SELECT {', '.join(CSV_FIELDS)} FROM events ORDER BY first_seen DESC"):
-        out.writerow([_cell(r[k]) for k in CSV_FIELDS])
+        out.writerow(["" if r[k] is None else r[k] if k in NUMERIC else _cell(r[k]) for k in CSV_FIELDS])
     return buf.getvalue()
 
 
@@ -65,6 +67,11 @@ def metrics(w) -> str:
         m("active_alerts", "gauge", "Number of active alert conditions.", [({}, len(st["active_alerts"]))])
         m("alert_active", "gauge", "1 for each active alert condition.", [({"key": k}, 1) for k in st["active_alerts"]])
         m("telegram_configured", "gauge", "1 if Telegram alerting is configured.", [({}, int(bool(st.get("telegram_configured"))))])
+        tdel = st.get("telegram_delivery") or {}
+        m("telegram_delivery_ok", "gauge", "1 last send worked, 0 failing, -1 nothing sent yet.",
+          [({}, -1 if tdel.get("ok") is None else int(bool(tdel["ok"])))])
+        m("alerts_undelivered_total", "counter", "Alert messages given up since the service started.",
+          [({}, tdel.get("undelivered", 0))])
         devs = st.get("devices", {})
         m("device_up", "gauge", "1 reachable, 0 unreachable, -1 not checked yet.",
           [({"device": n, "address": d.get("ip", "")}, 1 if d.get("ok") else (-1 if d.get("ok") is None else 0)) for n, d in devs.items()])

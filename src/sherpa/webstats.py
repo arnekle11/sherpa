@@ -5,19 +5,22 @@ import re
 import statistics
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from datetime import time as dtime
 
 from .webcharts import hbars, vbars
 from .webpages import STATE_BADGE, _avail_cls, _dt, _e, empty, layout, page_head, tile
 
 PERIODS = {"7": ("7 days", 7), "30": ("30 days", 30), "60": ("60 days", 60)}
-_TYPE = re.compile(r"^(.*?)\s+\d{1,2}\.\s*\d{1,2}\.\s*\d{4}")
+# Searched, not matched with a lazy prefix: `^(.*?)\s+...` backtracks quadratically on long whitespace runs.
+_DATE = re.compile(r"\s\d{1,2}\.\s?\d{1,2}\.\s?\d{4}")
 LAG_BUCKETS = (("< 2 s", 2), ("2-5 s", 5), ("5-10 s", 10), ("10-30 s", 30), ("30-60 s", 60), ("1-5 min", 300), ("> 5 min", float("inf")))
 
 
 def event_type(title: str) -> str:
     """'Prometna nesreča 5. 11. 2026 20:41' -> 'Prometna nesreča' (the feed puts date and time last)."""
-    m = _TYPE.match(title or "")
-    t = (m[1] if m else (title or "")).strip().rstrip(",")
+    title = (title or "")[:300]  # real titles are short; never spend time on a pathological one
+    m = _DATE.search(title)
+    t = (title[:m.start()] if m else title).strip().rstrip(",")
     return t or "(no title)"
 
 
@@ -31,7 +34,10 @@ def stats_page(w, user: bool, q: dict) -> str:
     p = p if p in PERIODS else "30"
     label, days = PERIODS[p]
     now = datetime.now(UTC)
-    cutoff = (now - timedelta(days=days)).isoformat()
+    today = now.astimezone().date()
+    day_list = [today - timedelta(days=days - 1 - i) for i in range(days)]
+    # Window = whole local calendar days, so the KPIs and the per-day charts count the same events.
+    cutoff = datetime.combine(day_list[0], dtime.min).astimezone().astimezone(UTC).isoformat()
     rows = w.query("SELECT title, first_seen, lag_s, state FROM events WHERE is_test=0 AND state!='ignored_old' "
                    "AND first_seen > ? ORDER BY first_seen", (cutoff,))
     period_chips = '<div class="chips">' + "".join(
@@ -43,12 +49,12 @@ def stats_page(w, user: bool, q: dict) -> str:
     n = len(rows)
     delivered = sum(r["state"] == "triggered" for r in rows)
     lags = [r["lag_s"] for r in rows if r["lag_s"] is not None]
-    today = now.astimezone().date()
-    day_list = [today - timedelta(days=days - 1 - i) for i in range(days)]
     polls_by_day: dict = {}
-    for r in w.query("SELECT minute, ok, failed FROM poll_log WHERE minute >= ?", (cutoff[:16],)):
+    # Grouped by UTC hour in SQL (at most 24 rows a day), then mapped to local dates here: cheap even at 60 days.
+    for r in w.query("SELECT substr(minute, 1, 13) AS hour, SUM(ok) AS ok, SUM(failed) AS failed FROM poll_log "
+                     "WHERE minute >= ? GROUP BY hour", (cutoff[:16],)):
         try:
-            d = datetime.strptime(r["minute"], "%Y-%m-%dT%H:%M").replace(tzinfo=UTC).astimezone().date()
+            d = datetime.strptime(r["hour"], "%Y-%m-%dT%H").replace(tzinfo=UTC).astimezone().date()
         except ValueError:
             continue
         acc = polls_by_day.setdefault(d, [0, 0])

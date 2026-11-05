@@ -12,6 +12,7 @@ import logging
 import secrets
 import sqlite3
 import time
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +38,9 @@ TOOL_ERR = {
     "confirm": "Tick the confirmation box to run a test event.",
     "duration": f"Duration must be a whole number from 1 to {commands.TEST_EVENT_MAX_S} seconds.",
     "write": "Could not queue the request; see the web log.",
+    "cooldown": f"Another test event ran less than {commands.TEST_EVENT_COOLDOWN_S} s ago. Wait a moment.",
+    "real_event": "A real event was seen recently and its LED may still be on. A test now would cut that alert "
+                  "short, so it is refused. Try again after the on-duration has passed.",
 }
 
 
@@ -52,6 +56,22 @@ class Web:
         self.db_path = Path(cfg.db_path)
         self.status_path = self.db_path.parent / "status.json"
         self.command_dir = commands.command_dir(self.db_path)
+
+    def test_event_blocker(self) -> str | None:
+        """Same rules as the service's (which stays authoritative), checked here for an immediate answer."""
+        def latest(sql: str) -> float | None:
+            rows = self.query(sql)
+            t = rows[0][0] if rows else None
+            return (datetime.now(UTC) - datetime.fromisoformat(t)).total_seconds() if t else None
+        test_age = latest("SELECT MAX(first_seen) FROM events WHERE is_test=1")
+        if test_age is not None and test_age < commands.TEST_EVENT_COOLDOWN_S:
+            return "cooldown"
+        cfg = self.cfg()
+        window = (max(d.on_duration_s for d in cfg.devices) if cfg else 300) + 30
+        real_age = latest("SELECT MAX(first_seen) FROM events WHERE is_test=0 AND state NOT IN ('ignored_old','abandoned')")
+        if real_age is not None and real_age < window:
+            return "real_event"
+        return None
 
     def service_alive(self) -> bool:
         st = self.status()
@@ -269,6 +289,8 @@ def make_handler(w: Web):
                     return "/settings?err=duration#tools"
                 if not 1 <= d <= commands.TEST_EVENT_MAX_S:
                     return "/settings?err=duration#tools"
+                if blocked := w.test_event_blocker():
+                    return f"/settings?err={blocked}#tools"
                 kind, params = "test_event", {"duration_s": d}
             try:
                 commands.submit(w.command_dir, kind, ip, **params)

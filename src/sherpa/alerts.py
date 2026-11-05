@@ -33,6 +33,7 @@ class TelegramNotifier:
         self._url = f"{api_base.rstrip('/')}/bot{token}/sendMessage"
         # trust_env=False: no proxy surprises; short timeouts, the worker retries.
         self._client = httpx.AsyncClient(timeout=10, trust_env=False)
+        self.last_error: str | None = None  # redacted, for the web UI
 
     def _redact(self, s: str) -> str:
         return s.replace(self._token, "***")
@@ -41,10 +42,13 @@ class TelegramNotifier:
         try:
             r = await self._client.post(self._url, json={"chat_id": self._chat, "text": text})
             if r.status_code == 200 and r.json().get("ok"):
+                self.last_error = None
                 return True
-            log.error("Telegram rejected message: HTTP %s %s", r.status_code, self._redact(r.text[:200]))
+            self.last_error = self._redact(f"HTTP {r.status_code} {r.text[:160]}")
+            log.error("Telegram rejected message: %s", self.last_error)
         except (httpx.HTTPError, ValueError) as e:
-            log.error("Telegram send failed: %s", self._redact(f"{type(e).__name__}: {e}"))
+            self.last_error = self._redact(f"{type(e).__name__}: {e}")[:200]
+            log.error("Telegram send failed: %s", self.last_error)
         return False
 
     async def aclose(self) -> None:
@@ -62,13 +66,20 @@ class AlertManager:
         self._active: dict[str, float] = {}
         self._q: asyncio.Queue[str] = asyncio.Queue()
         self.sent: list[str] = []  # everything queued, for tests/diagnostics
+        # delivery health, for the web UI: None = nothing sent yet
+        self.delivery_ok: bool | None = None
+        self.delivery_error: str | None = None
+        self.undelivered = 0
 
-    def _enqueue(self, text: str, kind: str = "info", key: str | None = None) -> None:
+    def _history(self, kind: str, key: str | None, text: str) -> None:
         if self._on_event:
             try:
                 self._on_event(kind, key, text)
             except Exception:
                 log.exception("alert history hook failed")
+
+    def _enqueue(self, text: str, kind: str = "info", key: str | None = None) -> None:
+        self._history(kind, key, text)
         msg = f"[SHERPA {self.host}] {text}"
         self.sent.append(msg)
         self._q.put_nowait(msg)
@@ -78,6 +89,10 @@ class AlertManager:
 
     def active_keys(self) -> list[str]:
         return sorted(self._active)
+
+    def delivery_snapshot(self) -> dict:
+        return {"ok": self.delivery_ok, "error": self.delivery_error, "undelivered": self.undelivered,
+                "queued": self._q.qsize()}
 
     def raise_(self, key: str, text: str) -> None:
         """Send once when the condition starts, then a reminder every repeat_s."""
@@ -101,10 +116,15 @@ class AlertManager:
             try:
                 for attempt in range(6):
                     if await self.notifier.send(msg):
+                        self.delivery_ok, self.delivery_error = True, None
                         break
+                    self.delivery_ok = False
+                    self.delivery_error = getattr(self.notifier, "last_error", None) or "send failed"
                     await asyncio.sleep(min(2 ** attempt, 30))
                 else:
+                    self.undelivered += 1
                     log.error("giving up delivering alert: %s", msg)
+                    self._history("undelivered", None, f"NOT delivered ({self.delivery_error}): {msg}")
             finally:
                 self._q.task_done()
 

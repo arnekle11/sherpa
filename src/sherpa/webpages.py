@@ -238,6 +238,13 @@ def notices(st: dict) -> str:
                    "Alerts are only logged and shown here; nobody is notified when something breaks. Put "
                    "<code>SHERPA_TELEGRAM_TOKEN</code> and <code>SHERPA_TELEGRAM_CHAT_ID</code> in <code>.env</code>, "
                    "then run <code>docker compose up -d</code>.</div></div>")
+    tdel = st.get("telegram_delivery") or {}
+    if st.get("telegram_configured") and tdel.get("ok") is False:
+        n = tdel.get("undelivered", 0)
+        out.append('<div class="notice bad">' + icon("alert") + '<div class="txt"><b>Telegram messages are failing to send.</b> '
+                   f'Alerts are NOT reaching you right now ({_e(str(tdel.get("error") or "unknown error"))})'
+                   + (f"; {n} message{'s' if n != 1 else ''} given up since the last start" if n else "")
+                   + ". Check the bot token and chat id in <code>.env</code>.</div></div>")
     dm = st.get("deadman") or {}
     if dm.get("configured") and dm.get("last_error"):
         out.append('<div class="notice warn">' + icon("alert") + '<div class="txt"><b>Dead-man\'s switch ping is failing</b> '
@@ -250,8 +257,9 @@ def poll_buckets(w, hours: int, bucket_min: int) -> tuple[datetime, list[dict]]:
     now = datetime.now(UTC).replace(second=0, microsecond=0)
     start = now - timedelta(hours=hours) + timedelta(minutes=1)
     n = hours * 60 // bucket_min
-    buckets = [{"ok": 0, "failed": 0, "lat_sum": 0.0, "lat_n": 0, "lat_max": 0.0, "minutes": 0} for _ in range(n)]
-    for r in w.query("SELECT * FROM poll_log WHERE minute >= ?", (start.strftime("%Y-%m-%dT%H:%M"),)):
+    buckets = [{"ok": 0, "failed": 0, "lat_sum": 0.0, "lat_n": 0, "lat_max": 0.0, "minutes": 0, "gap": 0} for _ in range(n)]
+    seen: list[datetime] = []
+    for r in w.query("SELECT * FROM poll_log WHERE minute >= ? ORDER BY minute", (start.strftime("%Y-%m-%dT%H:%M"),)):
         try:
             t = datetime.strptime(r["minute"], "%Y-%m-%dT%H:%M").replace(tzinfo=UTC)
         except ValueError:
@@ -263,6 +271,9 @@ def poll_buckets(w, hours: int, bucket_min: int) -> tuple[datetime, list[dict]]:
                 b[k] += r[k]
             b["lat_max"] = max(b["lat_max"], r["lat_max"])
             b["minutes"] += 1
+            if seen:  # minutes missing between two recorded ones = the service was not running
+                b["gap"] += max(0, int((t - seen[-1]).total_seconds() // 60) - 1)
+            seen.append(t)
     return start, buckets
 
 
@@ -288,7 +299,7 @@ def feed_health_card(w, st: dict) -> str:
     if not with_data:
         return f'<section class="card">{head}{empty("No history yet", "Poll statistics are written once a minute.")}</section>'
     covered_min = sum(x["minutes"] for x in b)
-    span_min = (len(b) - with_data[0]) * bucket
+    span_min = sum(x["minutes"] for x in b) + sum(x["gap"] for x in b)
     lsum = st.get("latency") or {}
     summary = (f'<div class="stats"><span>Availability <b>{100 * ok / max(ok + failed, 1):.2f}%</b></span>'
                f'<span>Polls <b>{ok + failed:,}</b></span><span>Failed <b>{failed:,}</b></span>'
@@ -308,10 +319,20 @@ def feed_health_card(w, st: dict) -> str:
 
 def feed_now_card(st: dict) -> str:
     items = st.get("feed_items") or []
+    at = st.get("feed_items_at")
+    if "feed_items_at" in st and at is None:  # this service run has not parsed the feed yet
+        return ('<section class="card"><div class="card-h"><h2>Currently in the feed</h2></div>'
+                + empty("No successful poll yet", "The feed has not answered since the service started.") + "</section>")
+    age = time.time() - at if at else 0
+    stale = at is not None and age > max(30.0, 5 * st.get("poll_interval_s", 2))
     head = (f'<div class="card-h"><h2>Currently in the feed</h2><span class="meta">{len(items)} item{"s" if len(items) != 1 else ""} '
-            "at the last poll</span></div>")
+            f'{"as of " + ago(age) if stale else "at the last poll"}</span></div>')
+    warn = (f'<div class="notice warn pad-notice">{icon("alert")}<div class="txt"><b>Out of date:</b> the feed has not '
+            f"answered for {ago(age).replace(' ago', '')}. This is the last known content.</div></div>") if stale else ""
     if not items:
-        return f'<section class="card">{head}{empty("The feed is empty", "That is the normal, quiet state.")}</section>'
+        quiet = (empty("The feed was empty", "That was the last known content; the feed is not answering now.") if stale
+                 else empty("The feed is empty", "That is the normal, quiet state."))
+        return f'<section class="card">{head}{warn}{quiet}</section>'
     now = datetime.now(UTC)
     rows = []
     for it in items[:12]:
@@ -319,7 +340,7 @@ def feed_now_card(st: dict) -> str:
         rel = ago((now - pub).total_seconds()) if pub else "no date"
         rows.append(f'<li><span>{_e(it.get("title") or "(no title)")}</span><span class="faint nowrap">{rel}</span></li>')
     more = f'<p class="small mute pad">… and {len(items) - 12} more</p>' if len(items) > 12 else ""
-    return f'<section class="card">{head}<ul class="feedlist">{"".join(rows)}</ul>{more}</section>'
+    return f'<section class="card">{head}{warn}<ul class="feedlist">{"".join(rows)}</ul>{more}</section>'
 
 
 def alert_paths_card(w, st: dict) -> str:
@@ -335,7 +356,18 @@ def alert_paths_card(w, st: dict) -> str:
         dm_cell = badge("mute", "starting")
     cfg = w.cfg()
     n_dev = len(cfg.devices) if cfg else 0
-    rows = [("Telegram", badge("ok", "configured") if tg else badge("bad", "not configured")),
+    tdel = st.get("telegram_delivery") or {}
+    if tg is None:  # status written by an older service version
+        tg_cell = badge("mute", "unknown")
+    elif not tg:
+        tg_cell = badge("bad", "not configured")
+    elif tdel.get("ok") is False:
+        tg_cell = badge("bad", "failing") + f' <span class="mute">{_e(str(tdel.get("error") or ""))[:80]}</span>'
+    elif tdel.get("ok"):
+        tg_cell = badge("ok", "delivering")
+    else:
+        tg_cell = badge("ok", "configured") + ' <span class="faint">nothing sent yet</span>'
+    rows = [("Telegram", tg_cell),
             ("Dead-man's switch", dm_cell),
             ("LED devices", f"{n_dev} configured"),
             ("Feed", f'polled every {st["poll_interval_s"]:g} s')]
@@ -414,6 +446,7 @@ ALERT_FILTERS = {
     "raised": ("Raised", "kind IN ('raise','repeat')"),
     "cleared": ("Cleared", "kind='clear'"),
     "info": ("Info", "kind='info'"),
+    "undelivered": ("Not delivered", "kind='undelivered'"),
 }
 
 
@@ -439,7 +472,8 @@ def alerts_page(w, user: bool, q: dict) -> str:
     f = q.get("f", "all")
     f = f if f in ALERT_FILTERS else "all"
     rows = w.query(f"SELECT * FROM alert_log WHERE {ALERT_FILTERS[f][1]} ORDER BY id DESC LIMIT 200")
-    kinds = {"raise": ("bad", "Raised"), "repeat": ("warn", "Still active"), "clear": ("ok", "Cleared"), "info": ("info", "Info")}
+    kinds = {"raise": ("bad", "Raised"), "repeat": ("warn", "Still active"), "clear": ("ok", "Cleared"), "info": ("info", "Info"),
+             "undelivered": ("bad", "Not delivered")}
     if rows:
         body_rows = "".join(
             f'<tr><td class="t">{when(r["ts"])}</td><td>{badge(*kinds.get(r["kind"], ("mute", r["kind"])))}</td>'

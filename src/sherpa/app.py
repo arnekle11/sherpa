@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import __version__, commands
 from .alerts import AlertManager, LogNotifier, Notifier, TelegramNotifier
-from .config import AppCfg, deadman_url_from_env, describe_changes, load_config, telegram_from_env
+from .config import AppCfg, describe_changes, load_config, telegram_from_env
 from .deadman import Deadman
 from .devices import make_device, make_device_client
 from .dispatcher import Dispatcher
@@ -23,6 +23,11 @@ log = logging.getLogger("sherpa.app")
 _ENV = object()
 
 
+class TestRefused(Exception):
+    """A test event would interfere with a (possibly) active real alert, or another test."""
+    __test__ = False  # not a pytest test class
+
+
 def build_notifier(cfg: AppCfg, telegram=_ENV) -> Notifier:
     creds = telegram_from_env() if telegram is _ENV else telegram
     if creds:
@@ -32,7 +37,7 @@ def build_notifier(cfg: AppCfg, telegram=_ENV) -> Notifier:
 
 
 class App:
-    def __init__(self, cfg: AppCfg, telegram=_ENV, config_path: str | None = None, deadman=_ENV):
+    def __init__(self, cfg: AppCfg, telegram=_ENV, config_path: str | None = None, deadman: str | None = None):
         self.cfg = cfg
         self.config_path = config_path  # set => watched; a valid change restarts the service to apply it
         self.restart_requested = False
@@ -56,11 +61,15 @@ class App:
         self.config_poll_s = 5.0
         self.pollstats = PollStats()
         self.last_items: list[dict] = []  # what the feed currently contains, for the web UI
-        self._last_poll_done = time.monotonic()
+        self.last_items_at: float | None = None  # wall-clock time of the last successful parse
+        self._last_poll_ok = time.monotonic()  # last poll iteration that did not crash
+        self.poll_health_grace_s = max(30.0, 5 * cfg.feed.poll_interval_s)
         self.command_poll_s = 2.0
-        self._last_test_event = float("-inf")
-        url = deadman_url_from_env() if deadman is _ENV else deadman
-        self.deadman = Deadman(url, cfg.alerts.deadman_interval_s, self._poll_healthy) if url else None
+        self._real_dispatches = 0  # bumped whenever a real activation starts
+        self._last_real_dispatch = float("-inf")
+        self._test_task: asyncio.Task | None = None
+        # Only `sherpa run` passes the URL: selftest/test-event must never tell the monitor we are alive.
+        self.deadman = Deadman(deadman, cfg.alerts.deadman_interval_s, self._poll_healthy) if deadman else None
         # counters (also used by selftest)
         self.polls_ok = self.polls_failed = self.polls_skipped = 0
         self.events_triggered = 0
@@ -106,10 +115,11 @@ class App:
                 await self.notifier.aclose()
             self.store.close()
 
-    def _spawn(self, coro, name: str) -> None:
+    def _spawn(self, coro, name: str) -> asyncio.Task:
         t = asyncio.create_task(coro, name=name)
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
+        return t
 
     async def _recover_pending(self) -> None:
         """A crash between 'recorded' and 'dispatched' must not lose an alert."""
@@ -117,6 +127,9 @@ class App:
         now = datetime.now(UTC)
         redo = []
         for row in self.store.pending():
+            if row["is_test"]:  # a test interrupted by a restart must never come back as a real 300 s activation
+                self.store.set_state(row["guid"], "abandoned", "test event interrupted by a restart")
+                continue
             if now - datetime.fromisoformat(row["first_seen"]) <= max_age:
                 redo.append(row["guid"])
             else:
@@ -132,7 +145,6 @@ class App:
         next_tick = loop.time()
         while not self._stop.is_set():
             await self.poll_once()
-            self._last_poll_done = time.monotonic()
             self._touch_health()
             next_tick += interval
             now = loop.time()
@@ -149,6 +161,7 @@ class App:
     async def poll_once(self) -> None:
         try:
             await self._poll()
+            self._last_poll_ok = time.monotonic()
         except asyncio.CancelledError:
             raise
         except Exception as e:  # nothing may kill the poll loop
@@ -183,6 +196,7 @@ class App:
             return
         self.polls_ok += 1
         self.pollstats.record(True, latency)
+        self.last_items_at = time.time()
         self.last_items = [{"title": it.title, "pub": it.pub_date.isoformat(timespec="seconds") if it.pub_date else None}
                            for it in parsed.items[:30]]
 
@@ -229,6 +243,12 @@ class App:
             self._spawn(self._dispatch([i.guid for i in new], "; ".join(i.title for i in new)[:200]), "dispatch")
 
     async def _dispatch(self, guids: list[str], reason: str) -> None:
+        self._real_dispatches += 1
+        self._last_real_dispatch = time.monotonic()
+        test = self._test_task
+        if test and not test.done():  # a real alert always wins over a test: stop the test's retries
+            log.warning("real event during a test event: cancelling the test")
+            test.cancel()
         try:
             results = await self.dispatcher.dispatch(reason)
         except Exception as e:
@@ -286,8 +306,12 @@ class App:
                 + ", ".join(f"{k}: {v}" for k, v in devs.items()))
 
     def _poll_healthy(self) -> bool:
-        """True while the poll loop keeps completing iterations (used by the dead-man's switch)."""
-        return time.monotonic() - self._last_poll_done < max(30.0, 5 * self.cfg.feed.poll_interval_s)
+        """True while polls keep completing without crashing (used by the dead-man's switch).
+
+        A feed outage is NOT unhealthy here: SHERPA itself alerts about that. A hung loop, or a poll that
+        raises every time (so no event could ever trigger), is: then only the external monitor can tell you.
+        """
+        return time.monotonic() - self._last_poll_ok < self.poll_health_grace_s
 
     def _flush_stats(self) -> None:
         rows = self.pollstats.drain()
@@ -335,6 +359,8 @@ class App:
                 "feed_ok_age_s": now - self._last_http_ok,
                 "active_alerts": self.alerts.active_keys(),
                 "telegram_configured": isinstance(self.notifier, TelegramNotifier),
+                "telegram_delivery": self.alerts.delivery_snapshot(),
+                "feed_items_at": self.last_items_at,
                 "deadman": self.deadman.snapshot() if self.deadman else {"configured": False},
                 "latency": self.pollstats.latency_summary(),
                 "feed_items": self.last_items,
@@ -373,7 +399,11 @@ class App:
                 continue
             self.alerts.clear("config-invalid", f"{path.name} is valid again")
             if new.model_dump() != self.cfg.model_dump():
-                changes = "; ".join(describe_changes(self.cfg, new))
+                try:
+                    changes = "; ".join(describe_changes(self.cfg, new)) or "no visible difference"
+                except Exception:
+                    log.exception("describing config changes failed")
+                    changes = "details unavailable"
                 log.warning("config changed on disk: restarting to apply it (%s)", changes)
                 self.alerts.info(f"settings changed ({changes}): restarting to apply them"[:600])
                 self.restart_requested = True
@@ -386,10 +416,15 @@ class App:
         while True:
             await asyncio.sleep(self.command_poll_s)
             try:
-                for cmd in commands.take(directory):
-                    self._run_command(cmd)
+                cmds = commands.take(directory)
             except Exception:
-                log.exception("command handling failed")
+                log.exception("reading admin commands failed")
+                continue
+            for cmd in cmds:
+                try:
+                    self._run_command(cmd)
+                except Exception:
+                    log.exception("admin command %s failed", cmd.get("kind"))
 
     def _run_command(self, cmd: dict) -> None:
         who = cmd["source"]
@@ -402,33 +437,84 @@ class App:
                 self.alerts.info(f"Telegram test requested from the web UI by {who}, but Telegram is NOT "
                                  "configured: alerts only go to the log and the web UI.")
         elif cmd["kind"] == "test_event":
-            now = time.monotonic()
-            if now - self._last_test_event < commands.TEST_EVENT_COOLDOWN_S:
-                self.alerts.info(f"test event from the web UI ({who}) refused: the previous one was less than "
-                                 f"{commands.TEST_EVENT_COOLDOWN_S} s ago")
+            if self._test_task and not self._test_task.done():
+                self.alerts.info(f"test event from the web UI ({who}) refused: a test event is already running")
                 return
-            self._last_test_event = now
             d = cmd["duration_s"]
             log.warning("TEST EVENT requested from the web UI by %s (%d s)", who, d)
-            self.alerts.info(f"test event requested from the web UI by {who}: switching every device ON for {d} s")
-            self._spawn(self._safe_test_event(d), "test-event")
+            self._test_task = self._spawn(self._safe_test_event(d, who), "test-event")
 
-    async def _safe_test_event(self, duration_s: int) -> None:
+    async def _safe_test_event(self, duration_s: int, who: str) -> None:
         try:
-            await self.send_test_event(duration_s)
-        except Exception as e:
+            reason = await self.test_event_blocker()
+            if reason:
+                raise TestRefused(reason)
+            self.alerts.info(f"test event requested from the web UI by {who}: switching every device ON for {duration_s} s")
+            await self.send_test_event(duration_s, force=True)  # just checked
+        except TestRefused as e:
+            log.warning("test event refused: %s", e)
+            self.alerts.info(f"test event from the web UI ({who}) refused: {e}")
+        except Exception as e:  # CancelledError (a real event took over) is not caught: nothing to report
             log.exception("test event failed")
             self.alerts.info(f"test event FAILED internally: {e!r}")
 
-    # ---------- test event ----------
-    async def send_test_event(self, duration_s: int | None = None) -> list:
-        guid = f"test:{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+    async def test_event_blocker(self) -> str | None:
+        """Why a test event must not run now, or None. A test re-arms every timer to a few seconds, which
+        would cut short a real alert that is still lighting the LED."""
         now = datetime.now(UTC)
+        last_test = self.store.last_event_time(test=True)
+        if last_test and (now - last_test).total_seconds() < commands.TEST_EVENT_COOLDOWN_S:
+            return f"the previous test event was less than {commands.TEST_EVENT_COOLDOWN_S} s ago"
+        window = max(d.on_duration_s for d in self.cfg.devices) + 30
+        last_real = self.store.last_event_time(test=False)
+        if last_real and (now - last_real).total_seconds() < window:
+            return (f"a real event was seen {int((now - last_real).total_seconds())} s ago and its LED may still "
+                    f"be on; try again in {int(window - (now - last_real).total_seconds()) + 1} s")
+        if time.monotonic() - self._last_real_dispatch < window:
+            return "a real activation ran recently (e.g. recovered after a restart); its LED may still be on"
+        states = await asyncio.gather(*(d.read_state() for d in self.devices), return_exceptions=True)
+        on = [d.name for d, st in zip(self.devices, states) if not isinstance(st, BaseException) and st.on]
+        if on:
+            return f"{', '.join(on)} {'is' if len(on) == 1 else 'are'} already ON - a real alert may be active"
+        return None
+
+    # ---------- test event ----------
+    async def send_test_event(self, duration_s: int | None = None, force: bool = False) -> list:
+        """Real dispatch path with a short timer. Refused (TestRefused) while a real alert may be active,
+        unless force=True. If a real event arrives meanwhile, the test is cancelled and the real ON re-sent."""
+        if not force:
+            reason = await self.test_event_blocker()
+            if reason:
+                raise TestRefused(reason)
+        seq = self._real_dispatches
+        now = datetime.now(UTC)
+        guid = f"test:{now.strftime('%Y%m%dT%H%M%S.%f')}"
         self.store.record(guid, "SHERPA test event", "", now, now, "pending", is_test=True)
-        results = await self.dispatcher.dispatch("TEST EVENT", duration_s)
+        try:
+            results = await self.dispatcher.dispatch("TEST EVENT", duration_s)
+        except asyncio.CancelledError:
+            self.store.set_state(guid, "abandoned", "cancelled: a real event arrived during the test")
+            self.alerts.info("test event cancelled: a real event arrived; its activation was re-sent")
+            raise
+        finally:
+            if self._real_dispatches != seq:  # a real event overlapped: make sure the real timer wins
+                self._spawn(self._rearm_after_test(), "rearm")
         ok = all(r.ok for r in results)
         self.store.set_state(guid, "triggered" if ok else "failed",
                              "; ".join(f"{r.name}={'ok' if r.ok else r.detail}" for r in results))
         self.alerts.info(f"test event dispatched: " + ", ".join(
             f"{r.name}={'OK' if r.ok else 'FAIL'}" for r in results))
         return results
+
+    async def _rearm_after_test(self) -> None:
+        """Re-send the real ON now and once more after a device timeout, so a late in-flight test
+        request (short timer) can never be the last word on a device during a real alert."""
+        delay = max(d.timeout_s for d in self.cfg.devices) + 1
+        for i in range(2):
+            if i:
+                await asyncio.sleep(delay)
+            try:
+                await self.dispatcher.dispatch("re-arm: a test event overlapped a real event")
+            except Exception:
+                log.exception("re-arm after test overlap failed")
+        log.warning("re-armed the real activation after a test event overlapped it")

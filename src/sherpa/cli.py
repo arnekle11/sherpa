@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .app import App
-from .config import AppCfg, load_config
+from .app import App, TestRefused
+from .config import AppCfg, deadman_url_from_env, load_config
 from .devices import make_device, make_device_client
 from .feed import FeedFetcher, FeedFormatError, FetchError, parse_feed
 from .store import Store
@@ -39,7 +39,7 @@ def cmd_run(args) -> int:
     cfg = _cfg(args)
 
     async def main() -> int:
-        app = App(cfg, config_path=args.config)
+        app = App(cfg, config_path=args.config, deadman=deadman_url_from_env())
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, app.stop)
@@ -60,7 +60,13 @@ def cmd_test_event(args) -> int:
     async def main() -> int:
         app = App(cfg)
         worker = asyncio.create_task(app.alerts.run())
-        results = await app.send_test_event(dur)
+        try:
+            results = await app.send_test_event(dur, force=args.force)
+        except TestRefused as e:
+            print(f"REFUSED: {e}\n(use --force only if you are sure no real alert is active)")
+            await app.alerts.drain(); worker.cancel()
+            await app.fetcher.aclose(); await app._dev_client.aclose()
+            return 3
         for r in results:
             print(f"{'OK  ' if r.ok else 'FAIL'} {r.name}: {r.detail} (attempts={r.attempts}, {r.elapsed_s:.2f}s)")
         await app.alerts.drain()
@@ -199,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     sp = add("test-event", cmd_test_event, "send a synthetic event through the real dispatch path (switches Shellies ON)")
     sp.add_argument("--duration", type=int, default=0, help="override on-duration in seconds (e.g. 10)")
     sp.add_argument("-y", "--yes", action="store_true")
+    sp.add_argument("--force", action="store_true", help="run even if a real alert may be active (cuts it short)")
     add("check", cmd_check, "read-only preflight: fetch the real feed, probe Shellies")
     sp = add("lag", cmd_lag, "show first-seen vs pubDate lag statistics")
     sp.add_argument("-n", type=int, default=15)

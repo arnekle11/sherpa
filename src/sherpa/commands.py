@@ -24,6 +24,15 @@ TEST_EVENT_COOLDOWN_S = 30
 _SOURCE = re.compile(r"^[0-9A-Fa-f:.]{1,45}$")  # an IP address, for the audit message
 
 
+_warned: set[str] = set()
+
+
+def _warn_once(name: str, msg: str) -> None:
+    if name not in _warned:
+        _warned.add(name)
+        log.warning(msg)
+
+
 def command_dir(db_path: str | Path) -> Path:
     return Path(db_path).parent / "commands"
 
@@ -68,13 +77,18 @@ def take(directory: str | Path) -> list[dict]:
     out = []
     for f in files:
         try:
-            raw = f.read_text(encoding="utf-8")
-            f.unlink()
-        except OSError:
-            continue  # vanished or unreadable: another taker or a permissions problem; never run twice
+            raw = f.read_bytes()
+        except OSError as e:
+            _warn_once(f.name, f"cannot read command file {f.name}: {type(e).__name__}")
+            continue
         try:
-            cmd = validate(json.loads(raw))
-        except ValueError:
+            f.unlink()  # claim it before running: a command must never run twice
+        except OSError as e:
+            _warn_once(f.name, f"cannot delete command file {f.name} ({type(e).__name__}); not running it")
+            continue
+        try:
+            cmd = validate(json.loads(raw.decode("utf-8")))
+        except ValueError:  # includes UnicodeDecodeError and JSONDecodeError
             cmd = None
         if cmd is None:
             log.warning("discarded invalid or stale command file %s", f.name)

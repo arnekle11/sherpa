@@ -150,3 +150,92 @@ def test_forms_are_not_nested(site):
     for tag in re.findall(r"</?form\b", page):
         depth += 1 if tag == "<form" else -1
         assert depth in (0, 1)
+
+
+def _db(tmp):
+    return Store(str(tmp / "data" / "sherpa.db"))
+
+
+def test_tool_precheck_refuses_during_recent_real_event(site):
+    base, tmp, _ = site
+    s = _db(tmp)
+    now = datetime.now(UTC)
+    s.record("fresh", "Požar 5. 11. 2026 21:00", "", now - timedelta(seconds=3), now - timedelta(seconds=60), "triggered")
+    s.close()
+    with httpx.Client() as c:
+        csrf = _login(c, base)
+        r = c.post(base + "/tools/test-event", data={"csrf": csrf, "duration_s": "10", "confirm": "yes"})
+        assert "err=real_event" in r.headers["location"]
+        assert "cut that alert short" in c.get(base + "/settings?err=real_event").text
+    assert commands.take(commands.command_dir(tmp / "data" / "sherpa.db")) == []
+
+
+def test_tool_precheck_cooldown(site):
+    base, tmp, _ = site
+    s = _db(tmp)
+    now = datetime.now(UTC)
+    s.record("test:x", "SHERPA test event", "", now, now - timedelta(seconds=5), "triggered", is_test=True)
+    s.close()
+    with httpx.Client() as c:
+        csrf = _login(c, base)
+        r = c.post(base + "/tools/test-event", data={"csrf": csrf, "duration_s": "10", "confirm": "yes"})
+        assert "err=cooldown" in r.headers["location"]
+
+
+def test_delivery_failure_banner_and_metrics(site):
+    base, _, sp = site
+    sp.write_text(json.dumps(_status(telegram_configured=True, telegram_delivery={
+        "ok": False, "error": "HTTP 401 Unauthorized", "undelivered": 2, "queued": 0})))
+    d = httpx.get(base + "/").text
+    assert "Telegram messages are failing to send" in d and "401" in d and "2 messages given up" in d
+    m = httpx.get(base + "/metrics").text
+    assert "sherpa_telegram_delivery_ok 0" in m and "sherpa_alerts_undelivered_total 2" in m
+    sp.write_text(json.dumps(_status(telegram_configured=True, telegram_delivery={"ok": True, "error": None,
+                                                                                   "undelivered": 0, "queued": 0})))
+    d = httpx.get(base + "/").text
+    assert "failing to send" not in d and "delivering" in d
+
+
+def test_old_status_file_shows_telegram_unknown(site):
+    base, _, sp = site
+    st = _status()
+    for k in ("telegram_configured", "telegram_delivery", "deadman", "latency", "feed_items", "feed_items_at"):
+        st.pop(k, None)
+    sp.write_text(json.dumps(st))
+    d = httpx.get(base + "/").text
+    assert "unknown" in d and "Telegram is not configured" not in d
+    assert httpx.get(base + "/stats").status_code == 200 and httpx.get(base + "/metrics").status_code == 200
+
+
+def test_feed_card_never_falsely_reassures(site):
+    base, _, sp = site
+    sp.write_text(json.dumps(_status(feed_items=[], feed_items_at=None)))
+    d = httpx.get(base + "/").text
+    assert "No successful poll yet" in d and "normal, quiet state" not in d
+    sp.write_text(json.dumps(_status(feed_items_at=time.time() - 600)))
+    d = httpx.get(base + "/").text
+    assert "Out of date" in d and "last known content" in d
+    sp.write_text(json.dumps(_status(feed_items=[], feed_items_at=time.time())))
+    assert "normal, quiet state" in httpx.get(base + "/").text
+
+
+def test_running_share_counts_gaps_not_the_unflushed_minute(site):
+    base, tmp, _ = site
+    # fixture: minutes now-39 .. now-1 all present -> 100 %; the current minute is not flushed yet
+    assert "Running <b>100%</b>" in httpx.get(base + "/").text
+    s = _db(tmp)
+    s.db.execute("DELETE FROM poll_log WHERE minute > ? AND minute < ?",
+                 ((datetime.now(UTC) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M"),
+                  (datetime.now(UTC) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M")))
+    s.close()
+    share = int(re.search(r"Running <b>(\d+)%</b>", httpx.get(base + "/").text)[1])
+    assert 60 <= share <= 80  # ~9 of ~39 minutes missing
+
+
+def test_undelivered_alerts_listed(site):
+    base, tmp, _ = site
+    s = _db(tmp)
+    s.log_alert("undelivered", None, "NOT delivered (HTTP 401): [SHERPA h] feed down")
+    s.close()
+    t = httpx.get(base + "/alerts?f=undelivered").text
+    assert "Not delivered" in t and "HTTP 401" in t

@@ -87,6 +87,13 @@ class Store:
     def set_state(self, guid: str, state: str, detail: str = "") -> None:
         self.db.execute("UPDATE events SET state=?, detail=? WHERE guid=?", (state, detail, guid))
 
+    def last_event_time(self, test: bool) -> datetime | None:
+        """Latest first_seen of a test event, or of a real event that was (or is being) dispatched."""
+        sql = ("SELECT MAX(first_seen) AS t FROM events WHERE is_test=1" if test else
+               "SELECT MAX(first_seen) AS t FROM events WHERE is_test=0 AND state NOT IN ('ignored_old','abandoned')")
+        r = self.db.execute(sql).fetchone()
+        return datetime.fromisoformat(r["t"]) if r and r["t"] else None
+
     def pending(self) -> list[sqlite3.Row]:
         return list(self.db.execute("SELECT * FROM events WHERE state='pending'"))
 
