@@ -142,6 +142,22 @@ def cmd_healthcheck(args) -> int:
     return 0 if age < args.max_age else 1
 
 
+def cmd_web(args) -> int:
+    import os
+    import threading
+
+    from .web import serve
+    _cfg(args)  # validates the config and sets up logging
+    srv = serve(args.config, os.environ.get("SHERPA_WEB_PASSWORD", ""), args.host, args.port)
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=srv.shutdown, daemon=True).start())
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    srv.server_close()
+    return 0
+
+
 def cmd_mock_feed(args) -> int:
     from .mock import MockFeed
     f = MockFeed(host=args.host, port=args.port).start()
@@ -190,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
     sp = add("healthcheck", cmd_healthcheck, "exit 1 if the poll loop is stale", config=False)
     sp.add_argument("--file", default="/data/health")
     sp.add_argument("--max-age", type=float, default=30)
+    sp = add("web", cmd_web, "run the web UI (dashboard, history, settings); password in SHERPA_WEB_PASSWORD")
+    sp.add_argument("--host", default="0.0.0.0"); sp.add_argument("--port", type=int, default=8080)
     sp = add("mock-feed", cmd_mock_feed, "serve a controllable mock RSS feed", config=False)
     sp.add_argument("--host", default="127.0.0.1"); sp.add_argument("--port", type=int, default=8099)
     sp = add("mock-shelly", cmd_mock_shelly, "serve a mock Shelly", config=False)
