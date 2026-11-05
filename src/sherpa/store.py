@@ -23,11 +23,30 @@ CREATE TABLE IF NOT EXISTS events (
   is_test    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS events_first_seen ON events(first_seen);
+CREATE TABLE IF NOT EXISTS alert_log (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts   TEXT NOT NULL,       -- ISO UTC
+  kind TEXT NOT NULL,       -- raise|repeat|clear|info
+  key  TEXT,                -- alert key for raise/repeat/clear
+  text TEXT NOT NULL
+);
 """
 
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.astimezone(UTC).isoformat() if dt else None
+
+
+def lag_summary(lags: list[float]) -> dict | None:
+    if not lags:
+        return None
+    lags = sorted(lags)
+    p95 = lags[min(len(lags) - 1, int(0.95 * len(lags)))]
+    return {"n": len(lags), "min": lags[0], "median": statistics.median(lags),
+            "p95": p95, "max": lags[-1]}
+
+
+LAG_SQL = "SELECT lag_s FROM events WHERE is_test=0 AND state NOT IN ('ignored_old') AND lag_s IS NOT NULL"
 
 
 class Store:
@@ -65,19 +84,17 @@ class Store:
     def prune(self, days: int = 60) -> None:
         cutoff = _iso(datetime.now(UTC) - timedelta(days=days))
         self.db.execute("DELETE FROM events WHERE first_seen < ?", (cutoff,))
+        self.db.execute("DELETE FROM alert_log WHERE ts < ?", (cutoff,))
+
+    def log_alert(self, kind: str, key: str | None, text: str) -> None:
+        self.db.execute("INSERT INTO alert_log(ts,kind,key,text) VALUES (?,?,?,?)",
+                        (_iso(datetime.now(UTC)), kind, key, text))
 
     def recent(self, n: int = 10) -> list[sqlite3.Row]:
         return list(self.db.execute("SELECT * FROM events ORDER BY first_seen DESC LIMIT ?", (n,)))
 
     def lag_stats(self) -> dict | None:
-        lags = [r["lag_s"] for r in self.db.execute(
-            "SELECT lag_s FROM events WHERE is_test=0 AND state NOT IN ('ignored_old') AND lag_s IS NOT NULL")]
-        if not lags:
-            return None
-        lags.sort()
-        p95 = lags[min(len(lags) - 1, int(0.95 * len(lags)))]
-        return {"n": len(lags), "min": lags[0], "median": statistics.median(lags),
-                "p95": p95, "max": lags[-1]}
+        return lag_summary([r["lag_s"] for r in self.db.execute(LAG_SQL)])
 
     def close(self) -> None:
         self.db.close()

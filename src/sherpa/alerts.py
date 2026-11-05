@@ -8,6 +8,7 @@ import asyncio
 import logging
 import socket
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 import httpx
@@ -52,16 +53,22 @@ class TelegramNotifier:
 
 class AlertManager:
     def __init__(self, notifier: Notifier, repeat_s: float = 1800.0, host: str | None = None,
-                 clock=time.monotonic):
+                 clock=time.monotonic, on_event: Callable[[str, str | None, str], None] | None = None):
         self.notifier = notifier
         self.repeat_s = repeat_s
         self.host = host or socket.gethostname()
         self._clock = clock
+        self._on_event = on_event  # (kind, key, text): history for the web UI; must never break alerting
         self._active: dict[str, float] = {}
         self._q: asyncio.Queue[str] = asyncio.Queue()
         self.sent: list[str] = []  # everything queued, for tests/diagnostics
 
-    def _enqueue(self, text: str) -> None:
+    def _enqueue(self, text: str, kind: str = "info", key: str | None = None) -> None:
+        if self._on_event:
+            try:
+                self._on_event(kind, key, text)
+            except Exception:
+                log.exception("alert history hook failed")
         msg = f"[SHERPA {self.host}] {text}"
         self.sent.append(msg)
         self._q.put_nowait(msg)
@@ -69,17 +76,21 @@ class AlertManager:
     def is_active(self, key: str) -> bool:
         return key in self._active
 
+    def active_keys(self) -> list[str]:
+        return sorted(self._active)
+
     def raise_(self, key: str, text: str) -> None:
         """Send once when the condition starts, then a reminder every repeat_s."""
         now = self._clock()
         last = self._active.get(key)
         if last is None or (self.repeat_s and now - last >= self.repeat_s):
             self._active[key] = now
-            self._enqueue(("🚨 " if last is None else "🚨 (still) ") + text)
+            self._enqueue(("🚨 " if last is None else "🚨 (still) ") + text,
+                          "raise" if last is None else "repeat", key)
 
     def clear(self, key: str, text: str) -> None:
         if self._active.pop(key, None) is not None:
-            self._enqueue("✅ " + text)
+            self._enqueue("✅ " + text, "clear", key)
 
     def info(self, text: str) -> None:
         self._enqueue("ℹ️ " + text)

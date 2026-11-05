@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__
 from .alerts import AlertManager, LogNotifier, Notifier, TelegramNotifier
-from .config import AppCfg, telegram_from_env
+from .config import AppCfg, load_config, telegram_from_env
 from .devices import make_device, make_device_client
 from .dispatcher import Dispatcher
 from .feed import FeedFetcher, FeedFormatError, FeedItem, FetchError, parse_feed
@@ -28,11 +30,13 @@ def build_notifier(cfg: AppCfg, telegram=_ENV) -> Notifier:
 
 
 class App:
-    def __init__(self, cfg: AppCfg, telegram=_ENV):
+    def __init__(self, cfg: AppCfg, telegram=_ENV, config_path: str | None = None):
         self.cfg = cfg
+        self.config_path = config_path  # set => watched; a valid change restarts the service to apply it
+        self.restart_requested = False
         self.store = Store(cfg.db_path)
         self.notifier = build_notifier(cfg, telegram)
-        self.alerts = AlertManager(self.notifier, cfg.alerts.repeat_min * 60)
+        self.alerts = AlertManager(self.notifier, cfg.alerts.repeat_min * 60, on_event=self.store.log_alert)
         self.fetcher = FeedFetcher(cfg.feed)
         self._dev_client = make_device_client()
         self.devices = [make_device(d, self._dev_client) for d in cfg.devices]
@@ -44,6 +48,10 @@ class App:
         self._baseline_done = False  # first successful poll after start
         self._logged_link = False
         self.health_file = Path(cfg.db_path).parent / "health"
+        self.status_file = Path(cfg.db_path).parent / "status.json"  # read by the web UI
+        self._status_written = 0.0
+        self.device_status: dict[str, dict] = {}
+        self.config_poll_s = 5.0
         # counters (also used by selftest)
         self.polls_ok = self.polls_failed = self.polls_skipped = 0
         self.events_triggered = 0
@@ -63,7 +71,8 @@ class App:
         loops = [asyncio.create_task(self._poll_loop(), name="poll"),
                  asyncio.create_task(self._device_probe_loop(), name="probe"),
                  asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
-                 asyncio.create_task(self._summary_loop(), name="summary")]
+                 asyncio.create_task(self._summary_loop(), name="summary"),
+                 asyncio.create_task(self._config_watch_loop(), name="config-watch")]
         try:
             await self._stop.wait()
         finally:
@@ -223,12 +232,15 @@ class App:
         out = {}
         for d in self.devices:
             key = f"offline:{d.name}"
+            checked = datetime.now(UTC).isoformat(timespec="seconds")
             try:
                 st = await d.read_state()
                 out[d.name] = f"reachable, relay {'ON' if st.on else 'off'}"
+                self.device_status[d.name] = {"ip": d.cfg.ip, "ok": True, "detail": out[d.name], "checked": checked}
                 self.alerts.clear(key, f"{d.name} is reachable again")
             except Exception as e:
                 out[d.name] = f"UNREACHABLE: {e}"
+                self.device_status[d.name] = {"ip": d.cfg.ip, "ok": False, "detail": out[d.name], "checked": checked}
                 self.alerts.raise_(key, f"{d.name} ({d.cfg.ip}) is not reachable: {e}. "
                                         f"It would NOT light up on an emergency.")
         return out
@@ -259,6 +271,64 @@ class App:
             self.health_file.touch()
         except OSError:
             pass
+        self._write_status()
+
+    def _write_status(self, min_interval_s: float = 5.0) -> None:
+        """Snapshot for the web UI (a separate process). Best effort: must never disturb polling."""
+        now = time.monotonic()
+        if now - self._status_written < min_interval_s:
+            return
+        self._status_written = now
+        try:
+            snap = {
+                "written": time.time(), "version": __version__,
+                "uptime_s": now - self._started,
+                "poll_interval_s": self.cfg.feed.poll_interval_s,
+                "polls_ok": self.polls_ok, "polls_failed": self.polls_failed,
+                "polls_skipped": self.polls_skipped, "events_triggered": self.events_triggered,
+                "last_event_at": self.last_event_at.isoformat(timespec="seconds") if self.last_event_at else None,
+                "feed_ok_age_s": now - self._last_http_ok,
+                "active_alerts": self.alerts.active_keys(),
+                "devices": {d.name: self.device_status.get(d.name, {"ip": d.cfg.ip, "ok": None,
+                            "detail": "not probed yet", "checked": None}) for d in self.devices},
+            }
+            tmp = self.status_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snap), encoding="utf-8")
+            os.replace(tmp, self.status_file)
+        except Exception:
+            log.debug("status snapshot failed", exc_info=True)
+
+    # ---------- config changes (made by the web UI) ----------
+    async def _config_watch_loop(self) -> None:
+        if not self.config_path:
+            return
+        path = Path(self.config_path)
+        try:
+            seen = path.stat().st_mtime_ns
+        except OSError:
+            seen = 0
+        while True:
+            await asyncio.sleep(self.config_poll_s)
+            try:
+                mtime = path.stat().st_mtime_ns
+            except OSError:
+                continue
+            if mtime == seen:
+                continue
+            seen = mtime
+            try:
+                new = load_config(path)
+            except Exception as e:
+                self.alerts.raise_("config-invalid", f"{path.name} changed but is INVALID, still running the "
+                                                     f"old settings: {str(e)[:300]}")
+                continue
+            self.alerts.clear("config-invalid", f"{path.name} is valid again")
+            if new.model_dump() != self.cfg.model_dump():
+                log.warning("config changed on disk: restarting to apply it")
+                self.alerts.info("settings changed: restarting to apply them")
+                self.restart_requested = True
+                self.stop()
+                return
 
     # ---------- test event ----------
     async def send_test_event(self, duration_s: int | None = None) -> list:

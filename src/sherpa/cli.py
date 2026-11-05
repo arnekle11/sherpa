@@ -16,6 +16,9 @@ from .feed import FeedFetcher, FeedFormatError, FetchError, parse_feed
 from .store import Store
 
 
+RESTART_EXIT = 75  # settings changed; docker "restart: unless-stopped" brings the service back with them
+
+
 def setup_logging(level: str) -> None:
     logging.basicConfig(level=level.upper(), format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     # httpx logs full request URLs at INFO, which would put the Telegram bot token in the logs.
@@ -35,15 +38,15 @@ def _cfg(args) -> AppCfg:
 def cmd_run(args) -> int:
     cfg = _cfg(args)
 
-    async def main() -> None:
-        app = App(cfg)
+    async def main() -> int:
+        app = App(cfg, config_path=args.config)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, app.stop)
         await app.run()
+        return RESTART_EXIT if app.restart_requested else 0
 
-    asyncio.run(main())
-    return 0
+    return asyncio.run(main())
 
 
 def cmd_test_event(args) -> int:
