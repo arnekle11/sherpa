@@ -29,8 +29,11 @@ def _fmt(v: float, unit: str) -> str:
 def vbars(values: Sequence[float | None], *, labels: Sequence[str] | None = None, label_every: int = 1,
           titles: Sequence[str] | None = None, unit: str = "", top: float | None = None,
           cls: Callable[[float], str] | None = None, none_title: str = "no data",
+          rest: str | None = None, failed: Sequence[bool] | None = None,
           width: int = 680, height: int = 160, aria: str = "bar chart") -> str:
-    """Vertical bars. None = no data: drawn as a full-height pale bar so gaps are visible, not hidden."""
+    """Vertical bars. None = no data: drawn as a full-height pale bar so gaps are visible, not hidden.
+    rest: CSS class for the part above each bar up to `top` (e.g. the failed share of 100 %), so a 0 % bucket
+    is a full red bar instead of nothing. failed[i]: this None is "running but no answer", drawn red."""
     L, R, T, B = 44, 8, 10, 22 if labels else 8
     pw, ph = width - L - R, height - T - B
     real = [v for v in values if v is not None]
@@ -48,16 +51,23 @@ def vbars(values: Sequence[float | None], *, labels: Sequence[str] | None = None
         x = L + i * slot + (slot - bw) / 2
         tip = titles[i] if titles else ""
         if v is None:
-            out.append(f'<rect class="bar none" x="{x:.1f}" y="{T}" width="{bw:.1f}" height="{ph:.1f}" rx="1">'
-                       f'<title>{_e(tip + (": " if tip else "") + none_title)}</title></rect>')
-            continue
-        h = max(1.5, ph * min(max(v, 0), top) / top) if v > 0 else 0
-        c = cls(v) if cls else ""
-        if h:
-            out.append(f'<rect class="bar {c}" x="{x:.1f}" y="{T + ph - h:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="1.5">'
-                       f'<title>{_e(tip + (": " if tip else "") + _fmt(round(v, 2), unit))}</title></rect>')
-        if labels and i % label_every == 0:
-            out.append(f'<text class="ax" x="{x + bw / 2:.1f}" y="{height - 6}" text-anchor="middle">{_e(labels[i])}</text>')
+            bad = bool(failed and failed[i])
+            out.append(f'<rect class="bar {"bad" if bad else "none"}" x="{x:.1f}" y="{T}" width="{bw:.1f}" height="{ph:.1f}" rx="1">'
+                       f'<title>{_e(tip + (": " if tip else "") + ("no answer from the feed" if bad else none_title))}</title></rect>')
+        else:
+            h = max(1.5, ph * min(max(v, 0), top) / top) if v > 0 else 0
+            c = cls(v) if cls else ""
+            tip_v = _e(tip + (": " if tip else "") + _fmt(round(v, 2), unit))
+            if rest and h < ph - 0.5:
+                out.append(f'<rect class="bar {rest}" x="{x:.1f}" y="{T}" width="{bw:.1f}" height="{ph - h:.1f}" rx="1">'
+                           f'<title>{tip_v}</title></rect>')
+            if h:
+                out.append(f'<rect class="bar {c}" x="{x:.1f}" y="{T + ph - h:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="1.5">'
+                           f'<title>{tip_v}</title></rect>')
+        if labels and labels[i] and i % label_every == 0:
+            cx = x + bw / 2  # near an edge, anchor the label inward so it is never clipped
+            anchor, tx = (("end", width - R) if cx > width - R - 18 else ("start", L) if cx < L + 18 else ("middle", cx))
+            out.append(f'<text class="ax" x="{tx:.1f}" y="{height - 6}" text-anchor="{anchor}">{_e(labels[i])}</text>')
     out.append("</svg>")
     return "".join(out)
 

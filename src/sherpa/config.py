@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Base(BaseModel):
@@ -20,7 +20,7 @@ class FeedCfg(_Base):
     max_age_min: float = Field(10.0, ge=0)
     down_after_s: float = Field(60.0, gt=0)
     expected_link_contains: str | None = "OD/52034"
-    user_agent: str = "SHERPA/0.1 (private first-responder notifier)"
+    user_agent: str = "SHERPA (private first-responder notifier)"
     max_response_bytes: int = Field(2_000_000, gt=0)
 
 
@@ -51,6 +51,13 @@ class AppCfg(_Base):
     db_path: str = "data/sherpa.db"
     log_level: str = "INFO"
 
+    @field_validator("log_level")
+    @classmethod
+    def _level(cls, v: str) -> str:
+        if v.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise ValueError("log_level must be DEBUG, INFO, WARNING or ERROR")
+        return v.upper()
+
     @model_validator(mode="after")
     def _unique_names(self) -> "AppCfg":
         names = [d.name for d in self.devices]
@@ -63,6 +70,34 @@ def load_config(path: str | Path) -> AppCfg:
     with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     return AppCfg.model_validate(raw)
+
+
+def load_config_with_fallback(path: str | Path, fallback: str | Path | None) -> tuple[AppCfg, str | None]:
+    """(config, error). If the file is invalid but a last-good copy exists, use that and return the error,
+    so a bad hand edit or an update that renamed a setting never stops SHERPA from starting."""
+    try:
+        return load_config(path), None
+    except Exception as e:
+        if fallback and Path(fallback).is_file():
+            try:
+                return load_config(fallback), str(e)
+            except Exception:
+                pass
+        raise
+
+
+def save_last_good(path: str | Path, fallback: str | Path | None) -> None:
+    """Keep a copy of a config that just loaded fine (atomic; only rewritten when it changed)."""
+    if not fallback:
+        return
+    data = Path(path).read_bytes()
+    fb = Path(fallback)
+    if fb.is_file() and fb.read_bytes() == data:
+        return
+    fb.parent.mkdir(parents=True, exist_ok=True)
+    tmp = fb.with_name(fb.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, fb)
 
 
 def telegram_from_env() -> tuple[str, str] | None:

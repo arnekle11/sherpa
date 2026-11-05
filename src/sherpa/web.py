@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
+import shutil
 import threading
 import logging
 import secrets
@@ -15,26 +17,30 @@ import sqlite3
 import time
 from datetime import UTC, datetime
 from http import HTTPStatus
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
-from . import __version__, commands, settings, webexport, webpages, webstats
-from .config import AppCfg, load_config
+from . import BUILD, commands, settings, webexport, webpages, webstats
+from .config import AppCfg, load_config, load_config_with_fallback
 from .webstyle import CSS, favicon
 
 log = logging.getLogger("sherpa.web")
 
 SESSION_IDLE_S = 30 * 60
+COOKIE = "sherpa_sid"
+MAX_CONNECTIONS = 32
 MAX_BODY = 64 * 1024
 LOGIN_MAX_FAILS, LOGIN_WINDOW_S = 5, 300
 
 TOOL_DONE = {
+    "restored": "The last good settings were restored. The service picks them up within a few seconds.",
     "telegram_test": "Telegram test requested. The message, or a note that Telegram is not configured, appears under Alerts within a few seconds.",
     "test_event": "Test event requested. Every device switches on for the chosen time; the result appears under Alerts and Events.",
 }
 TOOL_ERR = {
+    "no_backup": "There is no last-good copy to restore (the service writes it after each valid start).",
+    "restore_failed": "Restoring failed; see the web log.",
     "service_down": "The service is not running, so nothing can execute the request.",
     "confirm": "Tick the confirmation box to run a test event.",
     "duration": f"Duration must be a whole number from 1 to {commands.TEST_EVENT_MAX_S} seconds.",
@@ -48,13 +54,15 @@ TOOL_ERR = {
 class Web:
     """Shared state for all requests."""
 
-    def __init__(self, config_path: str, password: str | None):
+    def __init__(self, config_path: str, password: str | None, fallback: str | None = None):
         self.config_path = Path(config_path)
+        self.fallback = Path(fallback) if fallback else None
         self.password = password or None
         self.sessions: dict[str, dict] = {}
         self.fails: dict[str, list[float]] = {}
         self._lock = threading.Lock()  # the server is threaded; these dicts are shared
-        cfg = load_config(config_path)
+        self.db_error: str | None = None
+        cfg, _ = load_config_with_fallback(config_path, fallback)  # an invalid file must not take the UI down
         self.db_path = Path(cfg.db_path)
         self.status_path = self.db_path.parent / "status.json"
         self.command_dir = commands.command_dir(self.db_path)
@@ -87,6 +95,28 @@ class Web:
             log.warning("cannot load config for the web UI", exc_info=True)
             return None
 
+    def config_error(self) -> str | None:
+        try:
+            load_config(self.config_path)
+            return None
+        except Exception as e:
+            return str(e)
+
+    def can_restore(self) -> bool:
+        return bool(self.fallback and self.fallback.is_file())
+
+    def restore_last_good(self) -> None:
+        """Put the service's last-good copy back; the broken file is kept as config.yaml.broken."""
+        data = self.fallback.read_bytes()
+        load_config(self.fallback)  # never restore something invalid
+        try:
+            shutil.copy2(self.config_path, self.config_path.with_name(self.config_path.name + ".broken"))
+        except OSError:
+            pass
+        tmp = self.config_path.with_name(self.config_path.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, self.config_path)
+
     def status(self) -> dict | None:
         try:
             return json.loads(self.status_path.read_text(encoding="utf-8"))
@@ -96,15 +126,20 @@ class Web:
     def query(self, sql: str, args=()) -> list[sqlite3.Row]:
         if not self.db_path.exists():
             return []
-        db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2)
+        db = None
         try:
+            db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2)
             db.row_factory = sqlite3.Row
-            return list(db.execute(sql, args))
-        except sqlite3.Error as e:
+            rows = list(db.execute(sql, args))
+            self.db_error = None
+            return rows
+        except sqlite3.Error as e:  # unreadable or corrupt: say so on the page instead of failing it
             log.warning("db query failed: %s", e)
+            self.db_error = str(e)
             return []
         finally:
-            db.close()
+            if db is not None:
+                db.close()
 
     # ---- auth ----
     def new_session(self) -> tuple[str, dict]:
@@ -155,50 +190,69 @@ def make_handler(w: Web):
         server_version = "SHERPA-web"
         sys_version = ""
         protocol_version = "HTTP/1.1"
+        timeout = 20  # seconds a client may take per request; idle keep-alive connections are closed after that
 
-        def log_message(self, fmt, *args):  # no query strings / cookies in logs
-            log.info("%s %s", self.address_string(), fmt % args if args else fmt)
+        def log_request(self, code="-", size="-"):  # debug only, path without query string
+            log.debug("%s %s %s %s", self.address_string(), self.command, urlsplit(self.path).path, code)
+
+        def log_message(self, fmt, *args):  # timeouts, malformed requests: not worth an INFO line each
+            log.debug("%s %s", self.address_string(), fmt % args if args else fmt)
 
         # -- helpers
         def _cookie(self) -> str | None:
-            c = SimpleCookie(self.headers.get("Cookie", ""))
-            return c["sid"].value if "sid" in c else None
+            # By hand: http.cookies gives up on the whole header when another app's cookie is unusual.
+            for part in self.headers.get("Cookie", "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == COOKIE:
+                    return v.strip() or None
+            return None
 
         def _session(self) -> dict | None:
             return w.session(self._cookie())
 
         def _send(self, status: int, body: str | bytes, ctype="text/html; charset=utf-8", headers: dict | None = None):
             data = body.encode() if isinstance(body, str) else body
+            headers = headers or {}
             self.send_response(status)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            if status not in (204, 304):
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+            if "Cache-Control" not in headers:
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self'; "
                                                         "form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
-            for k, v in (headers or {}).items():
+            for k, v in headers.items():
                 self.send_header(k, v)
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(data)
+            try:
+                self.end_headers()
+                if self.command != "HEAD" and status not in (204, 304):
+                    self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):  # the client left: nothing to report
+                self.close_connection = True
 
         def _redirect(self, to: str, headers: dict | None = None):
             self._send(HTTPStatus.SEE_OTHER, "", headers={"Location": to, **(headers or {})})
 
         def _form(self) -> dict[str, str] | None:
+            if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+                self.close_connection = True  # the unread body must not be parsed as the next request
+                self._send(HTTPStatus.LENGTH_REQUIRED, "length required", "text/plain")
+                return None
             try:
                 n = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 n = -1
             if not 0 <= n <= MAX_BODY:
+                self.close_connection = True
                 self._send(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too large", "text/plain")
                 return None
             return dict(parse_qsl(self.rfile.read(n).decode("utf-8", "replace"), keep_blank_values=True))
 
         def _csrf_ok(self, sess: dict | None, form: dict) -> bool:
-            return sess is not None and hmac.compare_digest(form.get("csrf", ""), sess["csrf"])
+            return sess is not None and hmac.compare_digest(form.get("csrf", "").encode(), sess["csrf"].encode())
 
         # -- routes
         def do_HEAD(self):
@@ -235,13 +289,20 @@ def make_handler(w: Web):
                 elif path == "/metrics":
                     self._send(200, webexport.metrics(w), "text/plain; version=0.0.4; charset=utf-8")
                 elif path == "/settings":
-                    msg = (("ok", TOOL_DONE[q["done"]]) if q.get("done") in TOOL_DONE else
-                           ("bad", TOOL_ERR[q["err"]]) if q.get("err") in TOOL_ERR else None)
-                    self._send(200, webpages.settings_page(w, sess, tool_msg=msg))
+                    if q.get("done") == "saved":
+                        self._send(200, webpages.settings_page(w, sess, saved=True))
+                    else:
+                        msg = (("ok", TOOL_DONE[q["done"]]) if q.get("done") in TOOL_DONE else
+                               ("bad", TOOL_ERR[q["err"]]) if q.get("err") in TOOL_ERR else None)
+                        self._send(200, webpages.settings_page(w, sess, tool_msg=msg))
                 elif path == "/login":
-                    self._send(200, webpages.login_page(w, disabled=w.password is None))
+                    expired = "Your session expired, so the last change was not saved. Log in and apply it again."
+                    self._send(200, webpages.login_page(w, expired if q.get("expired") else "", disabled=w.password is None,
+                                                        notice=bool(q.get("expired"))))
                 else:
                     self._send(404, webpages.not_found(w, bool(sess)))
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
             except Exception:
                 log.exception("request failed: %s", path)
                 self._send(500, "internal error", "text/plain")
@@ -263,20 +324,36 @@ def make_handler(w: Web):
                         return self._send(401, webpages.login_page(w, "Wrong password."))
                     tok, _ = w.new_session()
                     log.info("login from %s", ip)
-                    return self._redirect("/settings", {"Set-Cookie": f"sid={tok}; HttpOnly; SameSite=Strict; Path=/"})
+                    return self._redirect("/settings", {"Set-Cookie": f"{COOKIE}={tok}; HttpOnly; SameSite=Strict; Path=/"})
                 if path == "/logout":
                     w.end_session(self._cookie())  # harmless to force, so no CSRF token needed
-                    return self._redirect("/", {"Set-Cookie": "sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"})
+                    return self._redirect("/", {"Set-Cookie": f"{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"})
                 if path == "/settings":
+                    if sess is None:
+                        return self._redirect("/login?expired=1")
+                    if not self._csrf_ok(sess, form):
+                        return self._send(403, "bad CSRF token", "text/plain")
+                    errors = settings.save(w.config_path, form, form.get("base", ""))
+                    if errors and errors[0] == settings.CONFLICT:  # show the file as it is now, not stale values
+                        return self._send(409, webpages.settings_page(w, sess, errors=errors))
+                    if errors:
+                        return self._send(400, webpages.settings_page(w, sess, errors=errors, form=form))
+                    log.warning("settings changed via web from %s", self.client_address[0])
+                    return self._redirect("/settings?done=saved")  # a reload must not post again
+                if path == "/settings/restore":
                     if sess is None:
                         return self._redirect("/login")
                     if not self._csrf_ok(sess, form):
                         return self._send(403, "bad CSRF token", "text/plain")
-                    errors = settings.save(w.config_path, form, form.get("base", ""))
-                    if errors:
-                        return self._send(400, webpages.settings_page(w, sess, errors=errors, form=form))
-                    log.warning("settings changed via web from %s", self.client_address[0])
-                    return self._send(200, webpages.settings_page(w, sess, saved=True))
+                    if not w.can_restore():
+                        return self._redirect("/settings?err=no_backup")
+                    try:
+                        w.restore_last_good()
+                    except Exception:
+                        log.exception("restoring the last good config failed")
+                        return self._redirect("/settings?err=restore_failed")
+                    log.warning("last good settings restored via web from %s", self.client_address[0])
+                    return self._redirect("/settings?done=restored")
                 if path in ("/tools/telegram-test", "/tools/test-event"):
                     if sess is None:
                         return self._redirect("/login")
@@ -284,6 +361,8 @@ def make_handler(w: Web):
                         return self._send(403, "bad CSRF token", "text/plain")
                     return self._redirect(self._tool(path, form))
                 self._send(404, "not found", "text/plain")
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
             except Exception:
                 log.exception("request failed: %s", path)
                 self._send(500, "internal error", "text/plain")
@@ -317,12 +396,42 @@ def make_handler(w: Web):
     return Handler
 
 
-def serve(config_path: str, password: str | None, host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServer:
-    w = Web(config_path, password)
+class _Server(ThreadingHTTPServer):
+    """A thread per connection, but at most MAX_CONNECTIONS at once: the web UI shares the VM with the poller,
+    and many slow or half-open connections must not starve it. Extra connections get a quick 503."""
+    daemon_threads = True
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
+def serve(config_path: str, password: str | None, host: str = "0.0.0.0", port: int = 8080,
+          fallback: str | None = None) -> ThreadingHTTPServer:
+    w = Web(config_path, password, fallback)
     if w.password is None:
         log.warning("SHERPA_WEB_PASSWORD not set: web UI is read-only, settings cannot be changed")
-    srv = ThreadingHTTPServer((host, port), make_handler(w))
-    srv.daemon_threads = True
+    srv = _Server((host, port), make_handler(w))
     srv.web = w  # type: ignore[attr-defined]
-    log.info("web UI v%s on http://%s:%d", __version__, host, srv.server_address[1])
+    log.info("web UI v%s on http://%s:%d", BUILD, host, srv.server_address[1])
     return srv

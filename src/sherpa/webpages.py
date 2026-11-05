@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlencode
 from datetime import UTC, datetime, timedelta
 
-from . import __version__, settings
+from . import BUILD, settings
 from .store import LAG_SQL, lag_summary
 from .webcharts import vbars
 from .webstyle import CSS_VERSION, LOGO, icon
@@ -21,7 +21,7 @@ NAV = (("dashboard", "/", "Dashboard"), ("events", "/events", "Events"),
 ALERT_LABELS = {
     "feed-down": "Feed unreachable", "feed-structure": "Feed structure changed",
     "feed-link": "Feed filter changed", "internal": "Internal error", "dispatch": "Dispatch error",
-    "config-invalid": "Settings file invalid",
+    "config-invalid": "Settings file invalid", "clock-skew": "VM clock is wrong",
 }
 # What to do, per alert. Plain words for whoever is looking at the dashboard during a callout.
 ALERT_HELP = {
@@ -35,12 +35,21 @@ ALERT_HELP = {
                "right (a router may have given it a new IP). It will NOT light up on an emergency until this clears.",
     "activate": "The Shelly did not confirm ON with its auto-off timer. Check the device, then run a test event under "
                 "Settings to confirm it works again.",
-    "config-invalid": "config.yaml was edited by hand and is invalid; SHERPA keeps running the previous settings. "
-                      "Fix the file, or save the settings again here.",
+    "config-invalid": "config.yaml is invalid (edited by hand, or a setting an update no longer accepts). SHERPA keeps "
+                      "running the last good settings, also after a restart. Settings → Restore last good settings, "
+                      "or fix the file.",
     "internal": "Unexpected error in the poll loop. Look at `docker compose logs sherpa`; if it keeps happening, "
                 "`docker compose restart sherpa`.",
     "dispatch": "Switching the devices crashed. Look at `docker compose logs sherpa`.",
+    "clock-skew": "The VM clock disagrees with the feed server by more than a minute, so the startup age filter "
+                  "(which decides what is too old to trigger) and the lag figures are wrong. On the VM: "
+                  "`sudo timedatectl set-ntp true`, then check `timedatectl`.",
 }
+
+
+def rich(text: str) -> str:
+    """Escape, then show `commands` as code (backticks survive html.escape, so this cannot inject markup)."""
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", _e(text))
 
 
 def alert_help(key: str | None) -> str:
@@ -131,8 +140,8 @@ def overview(w) -> dict:
     if st is None:
         return {"level": "unknown", "pill": "No data", "st": None, "alerts": []}
     age = time.time() - st["written"]
-    if age > STALE_STATUS_S:
-        return {"level": "bad", "pill": "Service down", "st": st, "age": age, "down": True, "alerts": []}
+    if abs(age) > STALE_STATUS_S:  # also a timestamp far in the future (clock stepped back): not proof of life
+        return {"level": "bad", "pill": "Service down", "st": st, "age": abs(age), "down": True, "alerts": []}
     lp = st.get("last_poll_age_s")
     if lp is not None and lp > poll_stall_limit(st):
         return {"level": "bad", "pill": "Polling stopped", "st": st, "stalled": lp, "alerts": st.get("active_alerts", [])}
@@ -178,11 +187,20 @@ def layout(w, title: str, body: str, active: str, user: bool, refresh: int = 0, 
         f'<a class="brand" href="/">{LOGO}<span>SHERPA<small>SOS 112 alerting</small></span></a>'
         f'<nav class="nav" aria-label="Main">{nav}</nav>'
         f'<div class="top-right"><span class="pill {ov["level"]}" title="Service status"><i></i>{_e(ov["pill"])}</span>{who}</div>'
-        f'</div></div><main class="wrap" id="main">{body}</main>'
-        f'<footer><span>SHERPA v{_e(__version__)}</span><span>Times in {_e(tz)} (server time zone)</span>'
+        f'</div></div><main class="wrap" id="main">{db_notice(w)}{body}</main>'
+        f'<footer><span>SHERPA v{_e(BUILD)}</span><span>Times in {_e(tz)} (server time zone)</span>'
         '<a href="/help">Help: what the alerts mean</a>'
         '<span>The public feed must not be the only alert path.</span></footer></body></html>'
     )
+
+
+def db_notice(w) -> str:
+    err = getattr(w, "db_error", None)
+    if not err:
+        return ""
+    return ('<div class="notice bad" role="alert">' + icon("alert") + '<div class="txt"><b>The database cannot be read</b> '
+            f"({_e(err[:160])}). History and statistics are missing below; the live status still works. Check the "
+            "VM's disk and <code>docker compose logs sherpa</code>.</div></div>")
 
 
 def page_head(title: str, sub: str = "", right: str = "") -> str:
@@ -202,7 +220,7 @@ def _active_alert_items(w, keys: list[str]) -> str:
         latest[r["key"]] = clean(r["text"])
     items = "".join(
         f'<li><b>{_e(alert_label(k))}</b><span>{_e(latest.get(k, "No details recorded."))}</span>'
-        + (f'<span class="todo"><b>What to do:</b> {_e(alert_help(k))}</span>' if alert_help(k) else "")
+        + (f'<span class="todo"><b>What to do:</b> {rich(alert_help(k))}</span>' if alert_help(k) else "")
         + "</li>" for k in keys)
     return f'<ul class="alert-list">{items}</ul>'
 
@@ -210,21 +228,21 @@ def _active_alert_items(w, keys: list[str]) -> str:
 def hero(w, ov: dict) -> str:
     st = ov["st"]
     if st is None:
-        return ('<section class="hero unknown">' + icon("unknown") + '<div class="body"><h1>No data from the service</h1>'
+        return ('<section class="hero unknown">' + icon("unknown") + '<div class="body"><h2>No data from the service</h2>'
                 "<p>The poller has not written a status yet. It may be starting, stopped, or not sharing the data volume.</p>"
                 "</div></section>")
     if ov.get("down"):
-        return ('<section class="hero bad">' + icon("down") + f'<div class="body"><h1>Service not responding</h1>'
+        return ('<section class="hero bad">' + icon("down") + f'<div class="body"><h2>Service not responding</h2>'
                 f'<p>Last status {ago(ov["age"])}. New emergencies will <b>not</b> switch the LED while the service is down.</p>'
                 "</div></section>")
     if ov.get("stalled") is not None:
-        return ('<section class="hero bad">' + icon("down") + '<div class="body"><h1>Polling has stopped</h1>'
+        return ('<section class="hero bad">' + icon("down") + '<div class="body"><h2>Polling has stopped</h2>'
                 f'<p>The service is running but has not finished a feed poll for {dur(ov["stalled"])}. New emergencies '
                 "will <b>not</b> switch the LED. Restart it: <code>docker compose restart sherpa</code>.</p>"
                 + (_active_alert_items(w, ov["alerts"]) if ov["alerts"] else "") + "</div></section>")
     if ov["alerts"]:
         n = len(ov["alerts"])
-        return ('<section class="hero bad">' + icon("alert") + f'<div class="body"><h1>{n} active alert{"s" if n != 1 else ""}</h1>'
+        return ('<section class="hero bad">' + icon("alert") + f'<div class="body"><h2>{n} active alert{"s" if n != 1 else ""}</h2>'
                 "<p>Something needs attention. The Alerts page has the full history.</p>"
                 + _active_alert_items(w, ov["alerts"]) + "</div></section>")
     devs = list(st["devices"].values())
@@ -237,12 +255,14 @@ def hero(w, ov: dict) -> str:
                 (f"Telegram messages are failing ({_e(str(tdel.get('error') or 'unknown error'))})"
                  + (f"; {n} message{'s' if n != 1 else ''} given up since the last start" if (n := tdel.get('undelivered', 0)) else "")
                  + ", so problems reach nobody. Check the bot token and chat id in <code>.env</code>."))
-        return ('<section class="hero warn">' + icon("alert") + '<div class="body"><h1>Running, but nobody is notified</h1>'
+        return ('<section class="hero warn">' + icon("alert") + '<div class="body"><h2>Running, but nobody is notified</h2>'
                 f"<p>Polling and the LEDs work. {text}</p></div></section>")
     checked = [d for d in devs if d["ok"] is not None]
+    cfg = w.cfg()
+    checks_off = cfg is not None and not cfg.alerts.device_check_interval_s
     dev_txt = (f'{sum(1 for d in checked if d["ok"])} of {len(devs)} devices reachable' if checked
-               else "devices not checked yet")
-    return ('<section class="hero ok">' + icon("ok") + '<div class="body"><h1>All systems operational</h1>'
+               else ("automatic device checks are off" if checks_off else "devices not checked yet"))
+    return ('<section class="hero ok">' + icon("ok") + '<div class="body"><h2>All systems operational</h2>'
             f'<p>Polling every {st["poll_interval_s"]:g} s · last good feed response {ago(st["feed_ok_age_s"])} · {dev_txt}</p>'
             "</div></section>")
 
@@ -255,12 +275,15 @@ def device_cards(w, st: dict | None) -> str:
         s = live.get(d.name, {"ok": None, "detail": "not checked yet", "checked": None})
         cls = "ok" if s["ok"] else ("unknown" if s["ok"] is None else "bad")
         chk = _dt(s.get("checked"))
-        when_txt = f"checked {ago((datetime.now(UTC) - chk).total_seconds())}" if chk else "checked every " + (
-            f"{cfg.alerts.device_check_interval_s / 60:g} min" if cfg.alerts.device_check_interval_s else "never")
+        every = cfg.alerts.device_check_interval_s
+        when_txt = (f"checked {ago((datetime.now(UTC) - chk).total_seconds())}" if chk else
+                    (f"first check right after start, then every {every / 60:g} min" if every else "automatic checks are off"))
         cards.append(
             f'<div class="dev"><div class="dev-top"><h3>{_e(d.name)}</h3>{badge("mute", f"Gen{d.generation}")}</div>'
             f'<div class="sub">{_e(d.model or "Shelly")} · <span class="mono">{_e(d.ip)}</span> · auto-off {d.on_duration_s} s</div>'
             f'<div class="state {cls}"><i></i><span>{_e(s["detail"])} <span class="faint">· {_e(when_txt)}</span></span></div></div>')
+    if cfg is None:
+        return empty("Settings file invalid", "The device list cannot be shown; see Settings.")
     return "".join(cards) or empty("No devices configured", "Add a Shelly under Settings.")
 
 
@@ -326,8 +349,9 @@ def notices(st: dict, hero_covers_telegram: bool = False) -> str:
 def poll_buckets(w, hours: int, bucket_min: int) -> tuple[datetime, list[dict]]:
     """poll_log aggregated into fixed buckets ending now (UTC)."""
     now = datetime.now(UTC).replace(second=0, microsecond=0)
-    start = now - timedelta(hours=hours) + timedelta(minutes=1)
     n = hours * 60 // bucket_min
+    current = now - timedelta(minutes=now.minute % bucket_min)  # buckets on clock boundaries, not "now minus x"
+    start = current - timedelta(minutes=bucket_min * (n - 1))
     buckets = [{"ok": 0, "failed": 0, "lat_sum": 0.0, "lat_n": 0, "lat_max": 0.0, "minutes": 0, "gap": 0} for _ in range(n)]
     seen: list[datetime] = []
     for r in w.query("SELECT * FROM poll_log WHERE minute >= ? ORDER BY minute", (start.strftime("%Y-%m-%dT%H:%M"),)):
@@ -361,12 +385,14 @@ def feed_health_card(w, st: dict) -> str:
     start, b = poll_buckets(w, 24, bucket)
     avail = [100 * x["ok"] / (x["ok"] + x["failed"]) if x["ok"] + x["failed"] else None for x in b]
     lat = [1000 * x["lat_sum"] / x["lat_n"] if x["lat_n"] else None for x in b]
+    noresp = [bool(x["minutes"]) and not x["lat_n"] for x in b]  # running, but the feed never answered
     stamps = [(start + timedelta(minutes=bucket * i)).astimezone() for i in range(len(b))]
-    labels = [t.strftime("%H:%M") for t in stamps]
+    labels = [t.strftime("%H:%M") if t.minute == 0 and t.hour % 4 == 0 else "" for t in stamps]
     titles = [t.strftime("%H:%M") + "-" + (t + timedelta(minutes=bucket)).strftime("%H:%M") for t in stamps]
     ok, failed = sum(x["ok"] for x in b), sum(x["failed"] for x in b)
     with_data = [i for i, x in enumerate(b) if x["minutes"]]
-    head = '<div class="card-h"><h2>Feed health, last 24 h</h2><span class="meta">15-minute buckets · grey = no data (service not running)</span></div>'
+    head = ('<div class="card-h"><h2>Feed health, last 24 h</h2><span class="meta">15-minute buckets · '
+            'red = the feed did not answer · grey = no data (service not running)</span></div>')
     if not with_data:
         return f'<section class="card">{head}{empty("No history yet", "Poll statistics are written once a minute.")}</section>'
     covered_min = sum(x["minutes"] for x in b)
@@ -380,10 +406,10 @@ def feed_health_card(w, st: dict) -> str:
                f'<span class="faint">last {lsum["n"]} responses</span></div>') if lsum else ""
     return (f'<section class="card">{head}<div class="card-b">'
             '<h3 class="chart-h">Successful polls (%)</h3>'
-            + vbars(avail, labels=labels, label_every=16, titles=titles, unit="%", top=100, cls=_avail_cls,
+            + vbars(avail, labels=labels, titles=titles, unit="%", top=100, cls=_avail_cls, rest="bad",
                     height=130, aria="Feed availability per 15 minutes")
             + summary + '<h3 class="chart-h">Average response time (ms)</h3>'
-            + vbars(lat, labels=labels, label_every=16, titles=titles, unit="", cls=_lat_cls, height=110,
+            + vbars(lat, labels=labels, titles=titles, unit="", cls=_lat_cls, height=110, failed=noresp,
                     aria="Average feed response time per 15 minutes")
             + lat_txt + "</div></section>")
 
@@ -414,6 +440,14 @@ def feed_now_card(st: dict) -> str:
     return f'<section class="card">{head}{warn}<ul class="feedlist">{"".join(rows)}</ul>{more}</section>'
 
 
+def clock_cell(skew: float | None) -> str:
+    if skew is None:
+        return '<span class="faint">not checked yet</span>'
+    if abs(skew) > 60:
+        return badge("bad", "wrong") + f' <span class="mute">{abs(skew):.0f} s {"ahead" if skew > 0 else "behind"}</span>'
+    return badge("ok", "in sync") + f' <span class="faint">{skew:+.1f} s vs the feed server</span>'
+
+
 def alert_paths_card(w, st: dict) -> str:
     tg = st.get("telegram_configured")
     dm = st.get("deadman") or {}
@@ -433,7 +467,7 @@ def alert_paths_card(w, st: dict) -> str:
     elif not tg:
         tg_cell = badge("bad", "not configured")
     elif tdel.get("ok") is False:
-        tg_cell = badge("bad", "failing") + f' <span class="mute">{_e(str(tdel.get("error") or ""))[:80]}</span>'
+        tg_cell = badge("bad", "failing") + f' <span class="mute">{_e(str(tdel.get("error") or "")[:80])}</span>'
     elif tdel.get("ok"):
         tg_cell = badge("ok", "delivering")
     else:
@@ -441,6 +475,7 @@ def alert_paths_card(w, st: dict) -> str:
     rows = [("Telegram", tg_cell),
             ("Dead-man's switch", dm_cell),
             ("LED devices", f"{n_dev} configured"),
+            ("VM clock", clock_cell(st.get("clock_skew_s"))),
             ("Feed", f'polled every {st["poll_interval_s"]:g} s')]
     dl = "".join(f"<dt>{_e(k)}</dt><dd>{v}</dd>" for k, v in rows)
     return ('<section class="card"><div class="card-h"><h2>Alert paths</h2><span class="meta">how you find out</span></div>'
@@ -458,13 +493,17 @@ def dashboard(w, user: bool, q: dict | None = None) -> str:
     out = [page_head("Dashboard", "Live view of the poller and the Shelly devices.", ctl), hero(w, ov)]
     if st and not ov.get("down"):
         cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
-        r = w.query("SELECT COUNT(*) AS n, SUM(state IN ('failed','partial','abandoned')) AS bad FROM events "
-                    "WHERE is_test=0 AND state!='ignored_old' AND first_seen > ?", (cutoff,))
+        stuck = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()  # dispatch finishes well within this
+        r = w.query("SELECT COUNT(*) AS n, SUM(state IN ('failed','partial','abandoned') OR "
+                    "(state='pending' AND first_seen < ?)) AS bad FROM events "
+                    "WHERE is_test=0 AND state!='ignored_old' AND first_seen > ?", (stuck, cutoff))
         n, bad = (r[0]["n"], r[0]["bad"] or 0) if r else (0, 0)
         feed_age = st["feed_ok_age_s"]
+        cfg = w.cfg()
+        down_after = cfg.feed.down_after_s if cfg else 60
         out.append('<div class="kpis">'
-                   + tile("Last good response", f"{feed_age:.0f} s", f'polling every {st["poll_interval_s"]:g} s',
-                          "bad" if feed_age > 60 else "")
+                   + tile("Last good response", "just now" if feed_age < 5 else ago(feed_age),
+                          f'polling every {st["poll_interval_s"]:g} s', "bad" if feed_age > down_after else "")
                    + tile("Polls OK", f'{st["polls_ok"]:,}', f'{st["polls_failed"]} failed · {st["polls_skipped"]} skipped (since start)')
                    + tile("Events, 24 h", str(n), (f'{bad} with delivery problems' if bad else ("all delivered" if n else "feed is quiet")),
                           "bad" if bad else "")
@@ -596,12 +635,12 @@ def alerts_page(w, user: bool, q: dict) -> str:
 
 
 # ------------------------------------------------------------------ login
-def login_page(w, error: str = "", disabled: bool = False) -> str:
+def login_page(w, error: str = "", disabled: bool = False, notice: bool = False) -> str:
     if disabled:
         inner = (f'{icon("lock")}<h1>Editing is disabled</h1><p>Set <code>SHERPA_WEB_PASSWORD</code> in '
                  "<code>.env</code> and restart the web service to enable login and settings changes.</p>")
     else:
-        err = f'<div class="notice bad"><div class="txt">{_e(error)}</div></div>' if error else ""
+        err = f'<div class="notice {"warn" if notice else "bad"}"><div class="txt">{_e(error)}</div></div>' if error else ""
         inner = (f'{LOGO}<h1>Log in</h1><p>Enter the admin password to view and change settings.</p>{err}'
                  '<form method="post" action="/login"><div class="field"><label for="p">Password</label>'
                  '<input id="p" name="password" type="password" autocomplete="current-password" autofocus></div>'
@@ -612,9 +651,10 @@ def login_page(w, error: str = "", disabled: bool = False) -> str:
 
 # ------------------------------------------------------------------ settings
 UNITS = {"poll_interval_s": "s", "max_age_min": "min", "down_after_s": "s", "repeat_min": "min",
-         "heartbeat_min": "min", "device_check_interval_s": "s"}
+         "heartbeat_min": "min", "device_check_interval_s": "s", "deadman_interval_s": "s"}
 DEV_LABELS = {
-    "name": ("Name", ""), "ip": ("Address", "IP or host, optionally :port"), "generation": ("Generation", "Gen1 or Gen2+"),
+    "name": ("Name", ""), "ip": ("Address", "IP or host, optionally :port"),
+    "generation": ("Generation", "from http://IP/shelly: \"gen\": 2, 3 or 4 = Gen2 or newer"),
     "model": ("Model label", "free text"), "channel": ("Relay channel", "usually 0"),
     "on_duration_s": ("On duration", "device-side auto-off timer"), "timeout_s": ("Timeout", "per attempt"),
     "attempts": ("Attempts", "tries including the first"), "retry_delay_s": ("Retry delay", "first back-off step"),
@@ -622,9 +662,11 @@ DEV_LABELS = {
 DEV_UNITS = {"on_duration_s": "s", "timeout_s": "s", "retry_delay_s": "s"}
 
 
-def _field(fid: str, label: str, value, hint: str = "", unit: str = "", err: str | None = None) -> str:
+def _field(fid: str, label: str, value, hint: str = "", unit: str = "", err: str | None = None,
+           numeric: bool = True) -> str:
     bad = f' aria-invalid="true" aria-describedby="{_e(fid)}-err"' if err else ""
-    inp = (f'<input type="text" id="{_e(fid)}" name="{_e(fid)}" value="{_e(str(value))}" inputmode="decimal" '
+    mode = ' inputmode="decimal"' if numeric else ""  # a decimal keypad has no letters or ":" (names, addresses)
+    inp = (f'<input type="text" id="{_e(fid)}" name="{_e(fid)}" value="{_e(str(value))}"{mode} '
            f'autocomplete="off"{bad}>')
     box = f'<div class="ig">{inp}<span class="u">{_e(unit)}</span></div>' if unit else inp
     h = f'<div class="hint">{_e(hint)}</div>' if hint else ""
@@ -638,11 +680,13 @@ def _device_card(i: int, d: dict, is_new: bool, live: dict | None, ferr: dict[st
     for k in settings.DEVICE_FIELDS:
         label, hint = DEV_LABELS[k]
         if k == "generation":
-            opts = "".join(f'<option value="{g}"{" selected" if str(d[k]) == str(g) else ""}>Gen{g}</option>' for g in (1, 2))
+            opts = "".join(f'<option value="{g}"{" selected" if str(d[k]) == str(g) else ""}>{n}</option>'
+                           for g, n in ((1, "Gen1"), (2, "Gen2 or newer")))
             fields.append(f'<div class="field"><label for="dev.{i}.generation">{label}</label>'
                           f'<select id="dev.{i}.generation" name="dev.{i}.generation">{opts}</select><div class="hint">{hint}</div></div>')
         else:
-            fields.append(_field(f"dev.{i}.{k}", label, d[k], hint, DEV_UNITS.get(k, ""), ferr.get(f"dev.{i}.{k}")))
+            fields.append(_field(f"dev.{i}.{k}", label, d[k], hint, DEV_UNITS.get(k, ""), ferr.get(f"dev.{i}.{k}"),
+                                 numeric=settings.DEVICE_FIELDS[k] is not str))
     has_err = any(k.startswith(f"dev.{i}.") for k in ferr)
     if is_new:
         extra = f'<input type="hidden" name="dev.{i}.new" value="1">'
@@ -661,6 +705,16 @@ def _device_card(i: int, d: dict, is_new: bool, live: dict | None, ferr: dict[st
                 f'{badge("mute", "Gen" + str(d["generation"]))} {state}</summary>')
         cls = "devcard"
     return (f'<details class="{cls}"{opened}>{head}<div class="dc-b"><div class="fgrid">{"".join(fields)}</div>{extra}</div></details>')
+
+
+def applied_note(w, digest: str) -> str:
+    """Whether the running service uses exactly the file shown (its status carries the hash it started with)."""
+    st = w.status() or {}
+    if not st or time.time() - st.get("written", 0) > STALE_STATUS_S or "config_hash" not in st:
+        return ""
+    if st.get("config_hash") == digest:
+        return f'<span class="small ok">{icon("ok")} The service runs exactly these settings</span>'
+    return f'<span class="small warn">{icon("alert")} Saved, not applied yet: the service restarts within a few seconds</span>'
 
 
 def tools_card(w, sess: dict, msg: tuple[str, str] | None = None) -> str:
@@ -694,12 +748,24 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
         return layout(w, "Settings", body, "settings", False)
     cfg = w.cfg()
     if cfg is None:
-        return layout(w, "Settings", page_head("Settings") + '<div class="notice bad"><div class="txt">'
-                      "Cannot read or validate the config file. Fix it on the server.</div></div>", "settings", True)
+        err = w.config_error() or "unknown error"
+        restore = (f'<form method="post" action="/settings/restore"><input type="hidden" name="csrf" value="{_e(sess["csrf"])}">'
+                   '<button class="btn" type="submit">Restore last good settings</button></form>'
+                   '<p class="hint">The service saves a copy each time it starts with valid settings; the broken file is kept '
+                   "as <code>config.yaml.broken</code>.</p>") if w.can_restore() else (
+                   "<p>No last-good copy exists yet. Fix <code>config/config.yaml</code> on the server.</p>")
+        msg = (f'<div class="notice {tool_msg[0]}"><div class="txt">{_e(tool_msg[1])}</div></div>' if tool_msg else "")
+        return layout(w, "Settings", page_head("Settings") + msg + '<section class="card attention"><div class="card-h">'
+                      "<h2>The settings file is invalid</h2></div><div class=\"card-b\">"
+                      f"<p>SHERPA keeps running the previous settings. Error:</p><pre class=\"err-text\">{_e(err)}</pre>"
+                      f"{restore}</div></section>", "settings", True)
     raw = cfg.model_dump()  # effective values: keys omitted from the file show their defaults
     digest = settings.config_hash(w.config_path)
     f = form if form is not None else {}
-    out = [page_head("Settings", "Changes are validated, saved to the config file, and applied by an automatic service restart.")]
+    out = [page_head("Settings", "Changes are validated, saved to the config file, and applied by an automatic service restart.",
+                     applied_note(w, digest))]
+    if tool_msg and tool_msg[1].startswith("The last good settings"):
+        out.append(f'<div class="notice ok">{icon("ok")}<div class="txt">{_e(tool_msg[1])}</div></div>')
     if saved:
         out.append('<div class="notice ok">' + icon("ok") + '<div class="txt"><b>Saved.</b> The service restarts itself within a few '
                    "seconds to apply the change; Telegram will report the restart.</div></div>")
@@ -723,7 +789,7 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
     out.append(f'<form method="post" action="/settings"><input type="hidden" name="csrf" value="{_e(sess["csrf"])}">'
                f'<input type="hidden" name="base" value="{_e(digest)}">')
     out.append(section("Feed polling", "how often and how strictly the feed is read", "feed", settings.FEED_FIELDS))
-    out.append(section("Alerting", "Telegram message timing", "alerts", settings.ALERT_FIELDS))
+    out.append(section("Alerting and checks", "Telegram timing and automatic checks", "alerts", settings.ALERT_FIELDS))
 
     devs = [dict(settings.DEVICE_DEFAULTS, **d.model_dump()) for d in cfg.devices]
     if form is not None:  # re-render what the user typed, under the same row numbers (errors refer to them)
@@ -753,11 +819,12 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
 
 def help_page(w, user: bool) -> str:
     rows = "".join(
-        f'<tr><td class="nowrap"><b>{_e(label)}</b></td><td>{_e(ALERT_HELP[key])}</td></tr>'
+        f'<tr><td class="nowrap"><b>{_e(label)}</b></td><td>{rich(ALERT_HELP[key])}</td></tr>'
         for key, label in (("feed-down", "Feed unreachable"), ("feed-structure", "Feed structure changed"),
                            ("feed-link", "Feed filter changed"), ("offline", "<device> unreachable"),
                            ("activate", "<device> did not switch on"), ("config-invalid", "Settings file invalid"),
-                           ("internal", "Internal error"), ("dispatch", "Dispatch error")))
+                           ("internal", "Internal error"), ("dispatch", "Dispatch error"),
+                           ("clock-skew", "VM clock is wrong")))
     states = "".join(f'<tr><td>{badge(k, v)}</td><td>{_e(t)}</td></tr>' for k, v, t in (
         ("ok", "Delivered", "every device confirmed ON with its auto-off timer"),
         ("warn", "Partly delivered", "some devices confirmed, others did not (see the detail column)"),

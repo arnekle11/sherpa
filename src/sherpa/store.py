@@ -72,6 +72,10 @@ class Store:
     def seen(self, guid: str) -> bool:
         return guid in self._seen
 
+    def mark_seen(self, guid: str) -> None:
+        """In-memory only: used when the database cannot be written, so a guid still triggers just once."""
+        self._seen.add(guid)
+
     def record(self, guid: str, title: str, link: str, pub: datetime | None,
                first_seen: datetime, state: str, detail: str = "", is_test: bool = False) -> bool:
         """Insert; return True only if this guid was new."""

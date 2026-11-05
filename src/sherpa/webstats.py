@@ -77,7 +77,7 @@ def stats_page(w, user: bool, q: dict) -> str:
     per_day = Counter(_dt(r["first_seen"]).astimezone().date() for r in rows if _dt(r["first_seen"]))
     every = 1 if days <= 7 else (5 if days <= 30 else 10)
     out.append(_card("Events per day", f"last {label}, local dates",
-                     vbars([per_day.get(d, 0) for d in day_list], labels=[d.strftime("%d.%m") for d in day_list],
+                     vbars([per_day.get(d, 0) for d in day_list], labels=[d.strftime("%d %b") for d in day_list],
                            label_every=every, titles=[d.strftime("%a %d %b") for d in day_list], aria="Events per day")
                      if rows else empty("No events", "The feed was quiet in this period.")))
 
@@ -102,8 +102,8 @@ def stats_page(w, user: bool, q: dict) -> str:
                              aria="Lag distribution")
                        if lags else empty("No lag data", ""))
                + _card("Feed availability per day", "successful polls; grey = no data",
-                       vbars(avail, labels=[d.strftime("%d.%m") for d in day_list], label_every=every, unit="%", top=100,
-                             cls=_avail_cls, titles=[d.strftime("%a %d %b") for d in day_list], width=440, height=170,
+                       vbars(avail, labels=[d.strftime("%d %b") for d in day_list], label_every=every, unit="%", top=100,
+                             cls=_avail_cls, rest="bad", titles=[d.strftime("%a %d %b") for d in day_list], width=440, height=170,
                              aria="Feed availability per day"))
                + "</div>")
 

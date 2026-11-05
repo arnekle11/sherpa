@@ -44,52 +44,69 @@ class ParsedFeed:
     problems: list[str] = field(default_factory=list)
 
 
-def _parse_date(raw: str | None) -> datetime | None:
+def _parse_date(raw: str | None) -> tuple[datetime | None, str | None]:
+    """(UTC datetime, None) or (None, why). Never raises: one odd date must not stop the poll."""
     if not raw or not raw.strip():
-        return None
+        return None, "missing pubDate"
     try:
-        dt = parsedate_to_datetime(raw.strip())
-    except (TypeError, ValueError):
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+        try:
+            dt = parsedate_to_datetime(raw.strip())
+        except ValueError:
+            dt = datetime.fromisoformat(raw.strip())  # ISO 8601 fallback, e.g. 2026-11-05T19:00:00Z
+        if dt.tzinfo is None:  # unknown zone name (e.g. CET) or -0000: guessing UTC could be hours off
+            return None, f"pubDate without a usable time zone ({raw.strip()!r})"
+        return dt.astimezone(UTC), None
+    except Exception:  # ValueError, TypeError, OverflowError (year 9999 with an offset), ...
+        return None, f"unparseable pubDate ({raw.strip()!r})"
+
+
+_STRICT = dict(resolve_entities=False, no_network=True, huge_tree=False)
 
 
 def parse_feed(data: bytes) -> ParsedFeed:
-    parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+    problems: list[str] = []
+    data = data.lstrip()  # whitespace before the XML declaration is invalid but harmless
     try:
-        root = etree.fromstring(data, parser)
+        root = etree.fromstring(data, etree.XMLParser(**_STRICT))
     except etree.XMLSyntaxError as e:
-        raise FeedFormatError(f"invalid XML: {e}") from e
+        # One bad character in one report (a raw '&', '&nbsp;', a control char from Word) must not hide every
+        # other item for the ~31 h it stays in the feed: read leniently, keep triggering, and say so.
+        try:
+            root = etree.fromstring(data, etree.XMLParser(recover=True, **_STRICT))
+        except etree.XMLSyntaxError:
+            root = None
+        if root is None:
+            raise FeedFormatError(f"invalid XML: {e}") from e
+        problems.append(f"feed XML is malformed and was read leniently ({e})")
     if root is None or etree.QName(root).localname != "rss":
         raise FeedFormatError(f"root element is not <rss> (got {getattr(root, 'tag', None)!r})")
-    channel = root.find("channel")
+    ns = etree.QName(root).namespace
+    q = (lambda tag: f"{{{ns}}}{tag}") if ns else (lambda tag: tag)  # tolerate a default namespace on <rss>
+    channel = root.find(q("channel"))
     if channel is None:
         raise FeedFormatError("no <channel> element")
 
-    atom_self = channel.xpath(f"*[local-name()='link' and @rel='self']/@href")
-    self_link = (atom_self[0] if atom_self else (channel.findtext("link") or "")).strip() or None
+    atom_self = channel.xpath("*[local-name()='link' and @rel='self']/@href")
+    self_link = (atom_self[0] if atom_self else (channel.findtext(q("link")) or "")).strip() or None
 
-    problems: list[str] = []
     items: list[FeedItem] = []
-    for idx, el in enumerate(channel.findall("item")):
-        title = (el.findtext("title") or "").strip()
-        link = (el.findtext("link") or "").strip()
-        guid = (el.findtext("guid") or "").strip() or link
-        raw_date = el.findtext("pubDate")
-        pub = _parse_date(raw_date)
+    for idx, el in enumerate(channel.findall(q("item"))):
+        title = (el.findtext(q("title")) or "").strip()
+        link = (el.findtext(q("link")) or "").strip()
+        guid = (el.findtext(q("guid")) or "").strip() or link
+        raw_date = el.findtext(q("pubDate"))
+        pub, date_problem = _parse_date(raw_date)
         if not guid:
             # Fail open: still dedupe-able, still triggers.
             guid = "synthetic:" + hashlib.sha1(f"{title}|{raw_date}".encode()).hexdigest()
             problems.append(f"item #{idx} has no guid/link (using synthetic id)")
         if not title:
             problems.append(f"item {guid} has no title")
-        if pub is None:
-            problems.append(f"item {guid} has missing/unparseable pubDate ({raw_date!r})")
+        if date_problem:
+            problems.append(f"item {guid}: {date_problem}")
         items.append(
             FeedItem(guid=guid, title=title, link=link,
-                     description=(el.findtext("description") or "").strip(), pub_date=pub)
+                     description=(el.findtext(q("description")) or "").strip(), pub_date=pub)
         )
     return ParsedFeed(self_link=self_link, items=items, problems=problems)
 
@@ -99,17 +116,21 @@ class FeedFetcher:
 
     def __init__(self, cfg: FeedCfg, client: httpx.AsyncClient | None = None):
         self.cfg = cfg
+        self.last_server_date: str | None = None  # HTTP Date header of the last 200 response (clock check)
         self.client = client or httpx.AsyncClient(
             headers={"User-Agent": cfg.user_agent, "Accept": "application/rss+xml, text/xml, */*"},
             timeout=httpx.Timeout(cfg.timeout_s),
-            limits=httpx.Limits(max_keepalive_connections=1, keepalive_expiry=60),
-            transport=httpx.AsyncHTTPTransport(retries=1),  # connect-level retry only
+            # limits must go to the transport: a client ignores its own limits= when transport= is given
+            transport=httpx.AsyncHTTPTransport(
+                retries=1,  # connect-level retry only
+                limits=httpx.Limits(max_keepalive_connections=1, keepalive_expiry=60)),
         )
 
     async def _get(self) -> bytes:
         async with self.client.stream("GET", self.cfg.url) as r:
             if r.status_code != 200:
                 raise FetchError(f"HTTP {r.status_code}")
+            self.last_server_date = r.headers.get("date")
             buf = bytearray()
             async for chunk in r.aiter_bytes():
                 buf += chunk

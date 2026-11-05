@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -59,11 +60,14 @@ BOUNDS = {
     "dev.attempts": (1, 10, False),
     "dev.retry_delay_s": (0, 10, False),
 }
-_HOST = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$")
+_HOST = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$")  # group 1 = ":port"
 _NAME = re.compile(r"^[A-Za-z0-9 ._\-]{1,40}$")
-_DEV_KEY = re.compile(r"^dev\.(\d+)\.(\w+)$")
+_DEV_KEY = re.compile(r"^dev\.(\d{1,3})\.(\w+)$")
 HEADER = ("# Managed by the SHERPA web UI (last saved {when}).\n"
           "# Comments are not kept when saving here; see config.example.yaml for what each setting means.\n")
+
+
+_SAVE_LOCK = threading.Lock()  # two simultaneous saves must not both say "Saved" while one is lost
 
 
 class FieldError(str):
@@ -87,7 +91,7 @@ def load_raw(path: str | Path) -> dict:
 
 def _num(kind, text: str, label: str, field: str, errors: list[FieldError]):
     try:
-        v = kind(text.strip())
+        v = kind(text.strip().replace(",", ".") if kind is float else text.strip())
     except ValueError:
         errors.append(FieldError(f"{label}: '{text}' is not a valid {'whole number' if kind is int else 'number'}", field))
         return None
@@ -115,9 +119,21 @@ def _bounded(bound_key: str, v, label: str, field: str, errors: list[FieldError]
     return False
 
 
+def _effective(raw: dict) -> dict:
+    """Current values incl. defaults, to tell edited fields from untouched ones."""
+    try:
+        return AppCfg.model_validate(raw).model_dump()
+    except ValidationError:
+        return {"feed": raw.get("feed") or {}, "alerts": raw.get("alerts") or {}, "devices": raw.get("devices") or []}
+
+
 def _build(raw: dict, form: dict[str, str]) -> tuple[dict, list[FieldError], list[int]]:
-    """(new raw config, errors, form row index of every resulting device)."""
+    """(new raw config, errors, form row index of every resulting device).
+
+    UI bounds apply to values the user changed. A value already in the file (set by hand, e.g. a 1 s poll the
+    feed operator agreed to) is kept as it is, so it never blocks saving an unrelated edit."""
     errors: list[FieldError] = []
+    eff = _effective(raw)
     new = {k: (dict(v) if isinstance(v, dict) else v) for k, v in raw.items()}
     new.setdefault("feed", {})
     new.setdefault("alerts", {})
@@ -126,7 +142,8 @@ def _build(raw: dict, form: dict[str, str]) -> tuple[dict, list[FieldError], lis
             name = f"{section}.{key}"
             if name in form:
                 v = _num(kind, form[name], label, name, errors)
-                if v is not None and _bounded(name, v, label, name, errors):
+                unchanged = v is not None and v == (eff.get(section) or {}).get(key)
+                if v is not None and (unchanged or _bounded(name, v, label, name, errors)):
                     new[section][key] = v
 
     rows: dict[int, dict[str, str]] = {}
@@ -141,7 +158,9 @@ def _build(raw: dict, form: dict[str, str]) -> tuple[dict, list[FieldError], lis
         if r.get("new") and not r.get("name", "").strip():
             continue  # the blank "add a device" row
         dev: dict = {}
-        label = f"Device {len(devices) + 1}"
+        name_txt = r.get("name", "").strip()
+        label = f"Device '{name_txt}'" if name_txt else ("New device" if r.get("new") else f"Device in row {idx + 1}")
+        old = {} if r.get("new") else (eff["devices"][idx] if idx < len(eff["devices"]) else {})
         for key, kind in DEVICE_FIELDS.items():
             field = f"dev.{idx}.{key}"
             flabel = f"{label} {DEVICE_LABELS[key]}"
@@ -152,19 +171,28 @@ def _build(raw: dict, form: dict[str, str]) -> tuple[dict, list[FieldError], lis
                 errors.append(FieldError(f"{flabel}: required", field))
             else:
                 v = _num(kind, text, flabel, field, errors)
-                if v is not None and (f"dev.{key}" not in BOUNDS or _bounded(f"dev.{key}", v, flabel, field, errors)):
+                unchanged = v is not None and v == old.get(key)
+                if v is not None and (unchanged or f"dev.{key}" not in BOUNDS
+                                      or _bounded(f"dev.{key}", v, flabel, field, errors)):
                     dev[key] = v
         if not _NAME.fullmatch(dev.get("name", "")):
             errors.append(FieldError(f"{label} name: 1-40 letters, digits, space . _ - only", f"dev.{idx}.name"))
-        if not _HOST.fullmatch(dev.get("ip", "")):
-            errors.append(FieldError(f"{label} address: an IP or host name, optionally with :port", f"dev.{idx}.ip"))
+        m = _HOST.fullmatch(dev.get("ip", ""))
+        if not m or (m[1] and not 1 <= int(m[1][1:]) <= 65535):
+            errors.append(FieldError(f"{label} address: an IP or host name, optionally with :port (1-65535)",
+                                     f"dev.{idx}.ip"))
+        retry_worst = dev.get("attempts", 1) * dev.get("timeout_s", 3) + sum(
+            min(dev.get("retry_delay_s", 0.5) * 2 ** i, 5.0) for i in range(max(dev.get("attempts", 1) - 1, 0)))
+        if retry_worst > 90 and not (old and all(old.get(k) == dev.get(k) for k in ("attempts", "timeout_s", "retry_delay_s"))):
+            errors.append(FieldError(f"{label}: attempts × timeout + retry delays add up to {retry_worst:.0f} s; a dead "
+                                     "device must be reported within 90 s", f"dev.{idx}.attempts"))
         devices.append(dev)
         rowmap.append(idx)
     addresses = [(d.get("ip", "").lower(), d.get("channel", 0)) for d in devices]
     for i, a in enumerate(addresses):
         if a[0] and addresses.index(a) != i:
-            errors.append(FieldError(f"Device {i + 1} address: the same relay is already used by device "
-                                     f"{addresses.index(a) + 1}", f"dev.{rowmap[i]}.ip"))
+            errors.append(FieldError(f"Device '{devices[i].get('name')}' address: the same relay (address and channel) "
+                                     f"is already used by '{devices[addresses.index(a)].get('name')}'", f"dev.{rowmap[i]}.ip"))
     new["devices"] = devices
     return new, errors, rowmap
 
@@ -193,18 +221,29 @@ def validate(new: dict, rowmap: list[int] | None = None) -> list[FieldError]:
             msg = err["msg"].removeprefix("Value error, ")
             if loc == ("devices",) and "at least 1" in msg:
                 msg = "at least one device is required (the last one cannot be removed)"
-            where = ".".join(str(p) for p in loc)
+            if len(loc) >= 3 and loc[0] == "devices" and isinstance(loc[1], int) and loc[1] < len(new.get("devices", [])):
+                where = f"Device '{new['devices'][loc[1]].get('name')}' {DEVICE_LABELS.get(str(loc[2]), loc[2])}"
+            else:
+                where = ".".join(str(p) for p in loc)
             out.append(FieldError(f"{where}: {msg}" if where else msg, _field_for(loc, rowmap or [])))
         return out
     return []
 
 
+CONFLICT = FieldError("Someone else saved the settings since you opened this page, so your edit was NOT applied. "
+                      "This page now shows the current settings: apply your change again.")
+
+
 def save(path: str | Path, form: dict[str, str], expected_hash: str) -> list[FieldError]:
     """Apply a submitted form. Returns errors; an empty list means the file was written."""
-    path = Path(path)
+    with _SAVE_LOCK:
+        return _save(Path(path), form, expected_hash)
+
+
+def _save(path: Path, form: dict[str, str], expected_hash: str) -> list[FieldError]:
     try:
         if config_hash(path) != expected_hash:
-            return [FieldError("The settings changed since you opened this page. Reload and apply your edit again.")]
+            return [CONFLICT]
         new, errors, rowmap = _build(load_raw(path), form)
     except (OSError, yaml.YAMLError) as e:
         return [FieldError(f"Cannot read {path.name}: {e}")]
@@ -217,7 +256,7 @@ def save(path: str | Path, form: dict[str, str], expected_hash: str) -> list[Fie
         shutil.copy2(path, path.with_name(path.name + ".bak"))
     except OSError:
         pass  # a missing backup must not block a valid change
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
         shutil.copymode(path, tmp)

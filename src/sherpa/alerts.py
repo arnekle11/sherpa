@@ -8,12 +8,15 @@ import asyncio
 import logging
 import socket
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Protocol
 
 import httpx
 
 log = logging.getLogger("sherpa.alerts")
+DEVICE_KEYS = {"activate", "offline", "stuck-on"}  # alert keys "<kind>:<device>", sent before anything else
+MAX_QUEUE = 300
 
 
 class Notifier(Protocol):
@@ -34,19 +37,27 @@ class TelegramNotifier:
         # trust_env=False: no proxy surprises; short timeouts, the worker retries.
         self._client = httpx.AsyncClient(timeout=10, trust_env=False)
         self.last_error: str | None = None  # redacted, for the web UI
+        self.retry_after: float = 0.0  # set by a 429 (Telegram rate limit): how long to wait before the next try
 
     def _redact(self, s: str) -> str:
         return s.replace(self._token, "***")
 
     async def send(self, text: str) -> bool:
+        self.retry_after = 0.0
         try:
-            r = await self._client.post(self._url, json={"chat_id": self._chat, "text": text})
-            if r.status_code == 200 and r.json().get("ok"):
+            r = await self._client.post(self._url, json={"chat_id": self._chat, "text": text[:4000]})
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
+            if r.status_code == 200 and isinstance(body, dict) and body.get("ok"):
                 self.last_error = None
                 return True
+            if r.status_code == 429 and isinstance(body, dict):
+                self.retry_after = float((body.get("parameters") or {}).get("retry_after") or 0)
             self.last_error = self._redact(f"HTTP {r.status_code} {r.text[:160]}")
             log.error("Telegram rejected message: %s", self.last_error)
-        except (httpx.HTTPError, ValueError) as e:
+        except Exception as e:  # whatever comes back, the alert worker must survive it
             self.last_error = self._redact(f"{type(e).__name__}: {e}")[:200]
             log.error("Telegram send failed: %s", self.last_error)
         return False
@@ -64,8 +75,12 @@ class AlertManager:
         self._clock = clock
         self._on_event = on_event  # (kind, key, text): history for the web UI; must never break alerting
         self._active: dict[str, float] = {}
-        self._q: asyncio.Queue[str] = asyncio.Queue()
-        self.sent: list[str] = []  # everything queued, for tests/diagnostics
+        # Priority queue: device problems first, then other alerts, recoveries, info. Bounded: when a flood
+        # builds up (e.g. Telegram down for hours), recoveries/info are dropped first, never raised alerts.
+        self._q: asyncio.PriorityQueue[tuple[int, int, str]] = asyncio.PriorityQueue()
+        self._seq = 0
+        self.dropped = 0
+        self.sent: deque[str] = deque(maxlen=2000)  # recently queued, for tests/diagnostics
         # delivery health, for the web UI: None = nothing sent yet
         self.delivery_ok: bool | None = None
         self.delivery_error: str | None = None
@@ -82,7 +97,14 @@ class AlertManager:
         self._history(kind, key, text)
         msg = f"[SHERPA {self.host}] {text}"
         self.sent.append(msg)
-        self._q.put_nowait(msg)
+        device = bool(key) and key.split(":", 1)[0] in DEVICE_KEYS
+        prio = (0 if device else 1) if kind in ("raise", "repeat") else (2 if kind == "clear" else 3)
+        if prio >= 2 and self._q.qsize() >= MAX_QUEUE:
+            self.dropped += 1
+            log.error("alert queue full (%d): dropping %s message: %s", self._q.qsize(), kind, msg)
+            return
+        self._seq += 1
+        self._q.put_nowait((prio, self._seq, msg))
 
     def is_active(self, key: str) -> bool:
         return key in self._active
@@ -92,7 +114,7 @@ class AlertManager:
 
     def delivery_snapshot(self) -> dict:
         return {"ok": self.delivery_ok, "error": self.delivery_error, "undelivered": self.undelivered,
-                "queued": self._q.qsize()}
+                "queued": self._q.qsize(), "dropped": self.dropped}
 
     def raise_(self, key: str, text: str) -> None:
         """Send once when the condition starts, then a reminder every repeat_s."""
@@ -112,15 +134,21 @@ class AlertManager:
 
     async def run(self) -> None:
         while True:
-            msg = await self._q.get()
+            _prio, _seq, msg = await self._q.get()
             try:
                 for attempt in range(6):
-                    if await self.notifier.send(msg):
+                    try:
+                        ok = await self.notifier.send(msg)
+                    except Exception as e:  # a notifier bug must not kill the worker (later alerts would never go)
+                        log.exception("notifier crashed")
+                        ok, self.notifier.last_error = False, f"{type(e).__name__}"  # type: ignore[attr-defined]
+                    if ok:
                         self.delivery_ok, self.delivery_error = True, None
                         break
                     self.delivery_ok = False
                     self.delivery_error = getattr(self.notifier, "last_error", None) or "send failed"
-                    await asyncio.sleep(min(2 ** attempt, 30))
+                    wait = max(min(2 ** attempt, 30), getattr(self.notifier, "retry_after", 0) or 0)
+                    await asyncio.sleep(min(wait, 120))
                 else:
                     self.undelivered += 1
                     log.error("giving up delivering alert: %s", msg)

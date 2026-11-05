@@ -204,6 +204,7 @@ def test_help_page(site):
     base, *_ = site
     t = httpx.get(base + "/help").text
     assert "Alerts and what to do" in t and "&lt;device&gt; unreachable" in t and "end to end" in t
+    assert "<code>docker compose logs sherpa</code>" in t and "`" not in t
 
 
 def test_keyset_paging(site):
@@ -238,3 +239,19 @@ def test_status_cli(site, capsys):
     assert "ALERT led-1 unreachable" in out and "what to do" in out and "NOT configured" in out
     sp.unlink()
     assert cli(["status", "-c", str(cfg)]) == 2
+
+
+def test_backup_is_consistent_and_refuses_to_overwrite(tmp_path, capsys):
+    db = tmp_path / "data" / "sherpa.db"
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(yaml.safe_dump({**BASE, "db_path": str(db)}))
+    s = Store(str(db))
+    now = datetime.now(UTC)
+    s.record("g1", "Požar 5. 11. 2026 21:00", "", now, now, "triggered")
+    out = tmp_path / "b.db"
+    assert cli(["backup", "-c", str(cfg), "--out", str(out)]) == 0  # while the store is open (WAL)
+    s.close()
+    assert "(1 events)" in capsys.readouterr().out
+    assert Store(str(out)).seen("g1")
+    with pytest.raises(SystemExit):
+        cli(["backup", "-c", str(cfg), "--out", str(out)])

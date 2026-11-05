@@ -22,7 +22,7 @@ def events_csv(w) -> str:
     buf = io.StringIO()
     buf.write("\ufeff")  # BOM: Excel otherwise mis-reads č/š/ž
     out = csv.writer(buf)
-    out.writerow(CSV_FIELDS)
+    out.writerow([f"{k}_utc" if k in ("first_seen", "pub_date") else k for k in CSV_FIELDS])
     for r in w.query(f"SELECT {', '.join(CSV_FIELDS)} FROM events ORDER BY first_seen DESC"):
         out.writerow(["" if r[k] is None else r[k] if k in NUMERIC else _cell(r[k]) for k in CSV_FIELDS])
     return buf.getvalue()

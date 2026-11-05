@@ -97,7 +97,8 @@ def test_settings_requires_login(site):
     with httpx.Client() as c:
         assert "Log in to view" in c.get(base + "/settings").text
         r = c.post(base + "/settings", data={"csrf": "x", "base": "y"})
-        assert r.status_code == 303 and r.headers["location"] == "/login"
+        assert r.status_code == 303 and r.headers["location"] == "/login?expired=1"
+        assert "session expired" in c.get(base + "/login?expired=1").text
 
 
 def test_wrong_password_and_lockout(site, monkeypatch):
@@ -126,7 +127,8 @@ def test_edit_flow_with_csrf(site):
         r = c.post(base + "/settings", data=dict(form, **{"feed.poll_interval_s": "1"}))
         assert r.status_code == 400 and "minimum" in r.text and load_config(path).feed.poll_interval_s == 2
         r = c.post(base + "/settings", data=form)
-        assert r.status_code == 200 and "Saved" in r.text
+        assert r.status_code == 303 and r.headers["location"] == "/settings?done=saved"  # reload must not re-post
+        assert "Saved." in c.get(base + r.headers["location"]).text
         assert load_config(path).feed.poll_interval_s == 3
 
 

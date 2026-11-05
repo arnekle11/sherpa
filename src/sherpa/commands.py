@@ -21,7 +21,7 @@ KINDS = ("telegram_test", "test_event")
 MAX_AGE_S = 60            # older command files are ignored
 TEST_EVENT_MAX_S = 60     # test events are short on purpose
 TEST_EVENT_COOLDOWN_S = 30
-_SOURCE = re.compile(r"^[0-9A-Fa-f:.]{1,45}$")  # an IP address, for the audit message
+_SOURCE = re.compile(r"^(cli|[0-9A-Fa-f:.]{1,45})$")  # "cli" or an IP address, for the audit message
 
 
 _warned: set[str] = set()

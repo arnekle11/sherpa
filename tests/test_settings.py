@@ -88,4 +88,4 @@ def test_stale_form_rejected(cfgfile):
     h = settings.config_hash(cfgfile)
     cfgfile.write_text(BASE + "log_level: DEBUG\n")
     errs = settings.save(cfgfile, _form(cfgfile), h)
-    assert errs and "changed since" in errs[0]
+    assert errs == [settings.CONFLICT]

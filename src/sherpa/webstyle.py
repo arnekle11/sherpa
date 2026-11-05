@@ -43,7 +43,7 @@ CSS = """
 :root{
   color-scheme:light dark;
   --bg:#f3f5f8;--surface:#fff;--surface-2:#f7f9fb;--line:#e2e6eb;--line-2:#cfd5dc;
-  --text:#16202b;--muted:#566474;--faint:#8693a1;
+  --text:#16202b;--muted:#536170;--faint:#687482;--on-bad:#fff;
   --primary:#1d4ed8;--primary-h:#1a43b8;--on-primary:#fff;--ring:rgba(29,78,216,.35);
   --ok:#0f7a3d;--ok-bg:#e5f5ec;--ok-line:#b5e0c6;
   --warn:#8f5200;--warn-bg:#fff2d9;--warn-line:#f0d49b;
@@ -54,7 +54,7 @@ CSS = """
 }
 @media (prefers-color-scheme:dark){:root{
   --bg:#0d1117;--surface:#151b23;--surface-2:#1a212b;--line:#262e39;--line-2:#36404d;
-  --text:#e7ebf0;--muted:#9aa6b4;--faint:#6f7c8b;
+  --text:#e7ebf0;--muted:#a3aebb;--faint:#8592a1;--on-bad:#2b0b08;
   --primary:#5b8def;--primary-h:#7aa3f5;--on-primary:#0b1220;--ring:rgba(91,141,239,.45);
   --ok:#4cc27a;--ok-bg:#10281b;--ok-line:#1d4a30;
   --warn:#e6ac3c;--warn-bg:#2d2310;--warn-line:#5a4519;
@@ -95,6 +95,7 @@ code{background:var(--surface-2);border:1px solid var(--line);padding:1px 6px;bo
 
 /* ---------- layout ---------- */
 .wrap{max-width:1180px;margin:0 auto;padding:24px 20px 56px}
+.page-head .small.ok{color:var(--ok)}.page-head .small.warn{color:var(--warn)}
 .page-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:8px 16px;margin-bottom:18px}
 .page-head h1{font-size:22px}.page-head p{margin:2px 0 0;color:var(--muted)}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);margin-bottom:18px}
@@ -108,7 +109,7 @@ footer{max-width:1180px;margin:0 auto;padding:0 20px 28px;color:var(--faint);fon
 /* ---------- hero ---------- */
 .hero{display:flex;gap:16px;align-items:flex-start;padding:18px 20px;border-radius:12px;border:1px solid;margin-bottom:18px;box-shadow:var(--shadow)}
 .hero .ico{width:34px;height:34px;flex:none;margin-top:2px}
-.hero h1{font-size:20px}.hero p{margin:3px 0 0;color:var(--text);opacity:.85}
+.hero h2{font-size:20px}.hero p{margin:3px 0 0;color:var(--text);opacity:.85}
 .hero.ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok)}
 .hero.bad{background:var(--bad-bg);border-color:var(--bad-line);color:var(--bad)}
 .hero.warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn)}
@@ -160,7 +161,7 @@ footer a{color:var(--muted);text-decoration:underline}
 .tool .row .field{width:140px}
 .check{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin:0 0 12px}
 .check input{width:16px;height:16px;margin-top:2px;accent-color:var(--bad)}
-.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff}.btn.danger:hover{filter:brightness(.92);background:var(--bad)}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:var(--on-bad)}.btn.danger:hover{filter:brightness(.92);background:var(--bad)}
 
 /* ---------- badges ---------- */
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid;white-space:nowrap}
@@ -207,6 +208,7 @@ td.det{max-width:360px;color:var(--muted);overflow-wrap:anywhere}
 .field .hint{font-size:12px;color:var(--muted);margin-top:5px}
 .field.invalid input{border-color:var(--bad);box-shadow:0 0 0 3px var(--bad-bg)}
 .field.invalid label{color:var(--bad)}
+.err-text{white-space:pre-wrap;font-family:var(--mono);font-size:13px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-x:auto}
 .ferr{font-size:12.5px;font-weight:600;color:var(--bad);margin-top:5px}
 input[type=text],input[type=password],select{font:inherit;width:100%;padding:8px 11px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--text);min-height:38px}
 input:hover,select:hover{border-color:var(--faint)}
@@ -259,7 +261,7 @@ details.devcard.add summary{color:var(--primary)}
   .nav a{flex:1;text-align:center;padding:10px 6px 8px}
   .wrap{padding:16px 14px 40px}
   .page-head h1{font-size:20px}
-  .hero{padding:14px;gap:12px}.hero .ico{width:26px;height:26px}.hero h1{font-size:18px}
+  .hero{padding:14px;gap:12px}.hero .ico{width:26px;height:26px}.hero h2{font-size:18px}
   .alert-list li{padding:8px 10px}
   .kpis{gap:10px}.kpi{padding:12px}.kpi .v{font-size:22px}
   .card-h,.card-b{padding-left:14px;padding-right:14px}.devs{padding:12px 14px}

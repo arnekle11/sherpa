@@ -90,7 +90,8 @@ class ShellyDevice(ABC):
                 last_err = str(e)
             log.warning("device %s attempt %d/%d failed: %s", self.name, attempt, self.cfg.attempts, last_err)
             if attempt < self.cfg.attempts:
-                await asyncio.sleep(self.cfg.retry_delay_s * (2 ** (attempt - 1)))
+                # exponential, but never more than 5 s per step: a failure must be reported within seconds
+                await asyncio.sleep(min(self.cfg.retry_delay_s * (2 ** (attempt - 1)), 5.0))
         return DeviceResult(self.name, False, self.cfg.attempts, last_err, time.monotonic() - t0)
 
 
@@ -124,5 +125,6 @@ def make_device(cfg: DeviceCfg, client: httpx.AsyncClient) -> ShellyDevice:
 
 
 def make_device_client() -> httpx.AsyncClient:
-    # LAN only: never use proxy env vars for Shellies.
-    return httpx.AsyncClient(trust_env=False, limits=httpx.Limits(keepalive_expiry=30))
+    # LAN only: never use proxy env vars for Shellies. No client timeout: each request is bounded by the
+    # device's own timeout_s (asyncio.wait_for in _get); httpx's 5 s default would silently cap it.
+    return httpx.AsyncClient(trust_env=False, timeout=None, limits=httpx.Limits(keepalive_expiry=30))
