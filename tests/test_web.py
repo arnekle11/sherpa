@@ -59,7 +59,8 @@ def test_public_pages_render_and_escape_feed_text(site):
         assert "&lt;script&gt;alert(1)&lt;/script&gt; Požar" in c.get(base + "/events").text
         assert "feed &lt;b&gt;UNREACHABLE" in c.get(base + "/alerts").text
         d = c.get(base + "/").text
-        assert "feed-down" in d and "UNREACHABLE: timeout" in d
+        assert "Feed unreachable" in d and "feed &lt;b&gt;UNREACHABLE&lt;/b&gt;" in d and "<b>UNREACHABLE" not in d
+        assert "UNREACHABLE: timeout" in d  # device state from status.json
         assert c.get(base + "/static.css").status_code == 200
 
 
@@ -67,7 +68,26 @@ def test_stale_status_shows_service_down(site):
     base, path, _ = site
     sp = path.parent / "data" / "status.json"
     st = json.loads(sp.read_text()); st["written"] -= 600; sp.write_text(json.dumps(st))
-    assert "DOWN" in httpx.get(base + "/").text
+    assert "Service not responding" in httpx.get(base + "/").text
+
+
+def test_filters_favicon_and_security_headers(site):
+    base, _, _ = site
+    with httpx.Client() as c:
+        assert "Požar" in c.get(base + "/events?f=delivered").text
+        assert "Požar" not in c.get(base + "/events?f=problems").text
+        assert "Požar" in c.get(base + "/events?f=nonsense").text  # unknown filter falls back to all
+        assert "UNREACHABLE" not in c.get(base + "/alerts?f=info").text
+        assert "UNREACHABLE" in c.get(base + "/alerts?f=raised").text
+        assert c.get(base + "/alerts?f=raised").status_code == 200
+        r = c.get(base + "/favicon.svg")
+        assert r.status_code == 200 and r.headers["content-type"] == "image/svg+xml"
+        assert c.get(base + "/favicon.ico").status_code == 204
+        css = c.get(base + "/static.css")
+        assert "text/css" in css.headers["content-type"]
+        for page in ("/", "/events", "/alerts", "/login"):
+            html_ = c.get(base + page).text
+            assert " style=" not in html_ and "<script" not in html_  # CSP forbids inline style/script
 
 
 def test_settings_requires_login(site):
@@ -133,8 +153,8 @@ def test_without_password_editing_is_disabled(tmp_path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
-        assert "Editing disabled" in httpx.get(base + "/login").text
-        assert "Editing disabled" in httpx.post(base + "/login", data={"password": ""}).text
+        assert "Editing is disabled" in httpx.get(base + "/login").text
+        assert "Editing is disabled" in httpx.post(base + "/login", data={"password": ""}).text
         assert httpx.get(base + "/").status_code == 200  # empty install still renders
     finally:
         srv.shutdown(); srv.server_close()

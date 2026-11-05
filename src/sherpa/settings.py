@@ -21,14 +21,14 @@ MIN_POLL_S = 2.0  # the feed operator's rate limit is unknown: never poll faster
 
 # (section, key) -> (parser, label, hint)
 FEED_FIELDS = {
-    "poll_interval_s": (float, "Poll interval (s)", f"seconds between feed polls, minimum {MIN_POLL_S:g}"),
-    "max_age_min": (float, "Max age at startup (min)", "on startup, items older than this are ignored"),
-    "down_after_s": (float, "Feed down after (s)", "alert if no healthy response for this long"),
+    "poll_interval_s": (float, "Poll interval", f"seconds between feed polls, minimum {MIN_POLL_S:g}"),
+    "max_age_min": (float, "Max age at startup", "on startup, items older than this are ignored"),
+    "down_after_s": (float, "Feed down after", "alert if no healthy response for this long"),
 }
 ALERT_FIELDS = {
-    "repeat_min": (float, "Alert repeat (min)", "re-send a still-active alert every N minutes, 0 = once"),
-    "heartbeat_min": (float, "Heartbeat (min)", "status message every N minutes, 0 = off"),
-    "device_check_interval_s": (float, "Device check (s)", "read-only reachability probe of every Shelly, 0 = off"),
+    "repeat_min": (float, "Alert repeat", "re-send a still-active alert every N minutes, 0 = once"),
+    "heartbeat_min": (float, "Heartbeat", "status message every N minutes, 0 = off"),
+    "device_check_interval_s": (float, "Device check", "read-only reachability probe of every Shelly, 0 = off"),
 }
 DEVICE_FIELDS = {
     "name": str, "ip": str, "generation": int, "model": str, "channel": int,
