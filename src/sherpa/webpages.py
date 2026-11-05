@@ -8,13 +8,14 @@ from datetime import UTC, datetime, timedelta
 
 from . import __version__, settings
 from .store import LAG_SQL, lag_summary
+from .webcharts import vbars
 from .webstyle import CSS_VERSION, LOGO, icon
 
 STALE_STATUS_S = 30
 _e = html.escape
 
 NAV = (("dashboard", "/", "Dashboard"), ("events", "/events", "Events"),
-       ("alerts", "/alerts", "Alerts"), ("settings", "/settings", "Settings"))
+       ("alerts", "/alerts", "Alerts"), ("stats", "/stats", "Stats"), ("settings", "/settings", "Settings"))
 
 ALERT_LABELS = {
     "feed-down": "Feed unreachable", "feed-structure": "Feed structure changed",
@@ -197,7 +198,7 @@ def device_cards(w, st: dict | None) -> str:
 def lag_chart(rows: list) -> str:
     """Bars of the most recent first-seen minus pubDate lags (seconds). Pure SVG, no script."""
     data = [(r["lag_s"], r["title"] or "", r["first_seen"]) for r in rows][::-1]
-    W, H, L, B, T = 680, 170, 40, 22, 10
+    W, H, L, B, T = 460, 160, 40, 22, 10  # sized for a half-width card
     top = next((n for n in (2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600) if n >= max(x[0] for x in data)), 7200)
     pw, ph = W - L - 8, H - B - T
     out = [f'<svg class="chart" viewBox="0 0 {W} {H}" role="img" aria-label="Feed lag per event in seconds">']
@@ -230,6 +231,121 @@ def lag_card(w) -> str:
     return f'<section class="card">{head}<div class="card-b">{lag_chart(rows)}{summary}</div></section>'
 
 
+def notices(st: dict) -> str:
+    out = []
+    if not st.get("telegram_configured", True):
+        out.append('<div class="notice warn">' + icon("alert") + '<div class="txt"><b>Telegram is not configured.</b> '
+                   "Alerts are only logged and shown here; nobody is notified when something breaks. Put "
+                   "<code>SHERPA_TELEGRAM_TOKEN</code> and <code>SHERPA_TELEGRAM_CHAT_ID</code> in <code>.env</code>, "
+                   "then run <code>docker compose up -d</code>.</div></div>")
+    dm = st.get("deadman") or {}
+    if dm.get("configured") and dm.get("last_error"):
+        out.append('<div class="notice warn">' + icon("alert") + '<div class="txt"><b>Dead-man\'s switch ping is failing</b> '
+                   f'({_e(dm["last_error"])}). Your external monitor will raise an alarm soon if this continues.</div></div>')
+    return "".join(out)
+
+
+def poll_buckets(w, hours: int, bucket_min: int) -> tuple[datetime, list[dict]]:
+    """poll_log aggregated into fixed buckets ending now (UTC)."""
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    start = now - timedelta(hours=hours) + timedelta(minutes=1)
+    n = hours * 60 // bucket_min
+    buckets = [{"ok": 0, "failed": 0, "lat_sum": 0.0, "lat_n": 0, "lat_max": 0.0, "minutes": 0} for _ in range(n)]
+    for r in w.query("SELECT * FROM poll_log WHERE minute >= ?", (start.strftime("%Y-%m-%dT%H:%M"),)):
+        try:
+            t = datetime.strptime(r["minute"], "%Y-%m-%dT%H:%M").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        i = int((t - start).total_seconds() // (bucket_min * 60))
+        if 0 <= i < n:
+            b = buckets[i]
+            for k in ("ok", "failed", "lat_sum", "lat_n"):
+                b[k] += r[k]
+            b["lat_max"] = max(b["lat_max"], r["lat_max"])
+            b["minutes"] += 1
+    return start, buckets
+
+
+def _avail_cls(v: float) -> str:
+    return "ok" if v >= 99 else ("warn" if v >= 90 else "bad")  # one missed 2 s poll is retried 2 s later
+
+
+def _lat_cls(v: float) -> str:
+    return "bad" if v > 2500 else ("warn" if v > 1500 else "")
+
+
+def feed_health_card(w, st: dict) -> str:
+    bucket = 15
+    start, b = poll_buckets(w, 24, bucket)
+    avail = [100 * x["ok"] / (x["ok"] + x["failed"]) if x["ok"] + x["failed"] else None for x in b]
+    lat = [1000 * x["lat_sum"] / x["lat_n"] if x["lat_n"] else None for x in b]
+    stamps = [(start + timedelta(minutes=bucket * i)).astimezone() for i in range(len(b))]
+    labels = [t.strftime("%H:%M") for t in stamps]
+    titles = [t.strftime("%H:%M") + "-" + (t + timedelta(minutes=bucket)).strftime("%H:%M") for t in stamps]
+    ok, failed = sum(x["ok"] for x in b), sum(x["failed"] for x in b)
+    with_data = [i for i, x in enumerate(b) if x["minutes"]]
+    head = '<div class="card-h"><h2>Feed health, last 24 h</h2><span class="meta">15-minute buckets · grey = no data (service not running)</span></div>'
+    if not with_data:
+        return f'<section class="card">{head}{empty("No history yet", "Poll statistics are written once a minute.")}</section>'
+    covered_min = sum(x["minutes"] for x in b)
+    span_min = (len(b) - with_data[0]) * bucket
+    lsum = st.get("latency") or {}
+    summary = (f'<div class="stats"><span>Availability <b>{100 * ok / max(ok + failed, 1):.2f}%</b></span>'
+               f'<span>Polls <b>{ok + failed:,}</b></span><span>Failed <b>{failed:,}</b></span>'
+               f'<span>Running <b>{min(100.0, 100 * covered_min / max(span_min, 1)):.0f}%</b> of the time since first data</span></div>')
+    lat_txt = (f'<div class="stats"><span>Latency now <b>{lsum["last_ms"]:.0f} ms</b></span><span>Median <b>{lsum["median_ms"]:.0f} ms</b></span>'
+               f'<span>p95 <b>{lsum["p95_ms"]:.0f} ms</b></span><span>Max <b>{lsum["max_ms"]:.0f} ms</b></span>'
+               f'<span class="faint">last {lsum["n"]} responses</span></div>') if lsum else ""
+    return (f'<section class="card">{head}<div class="card-b">'
+            '<h3 class="chart-h">Successful polls (%)</h3>'
+            + vbars(avail, labels=labels, label_every=16, titles=titles, unit="%", top=100, cls=_avail_cls,
+                    height=130, aria="Feed availability per 15 minutes")
+            + summary + '<h3 class="chart-h">Average response time (ms)</h3>'
+            + vbars(lat, labels=labels, label_every=16, titles=titles, unit="", cls=_lat_cls, height=110,
+                    aria="Average feed response time per 15 minutes")
+            + lat_txt + "</div></section>")
+
+
+def feed_now_card(st: dict) -> str:
+    items = st.get("feed_items") or []
+    head = (f'<div class="card-h"><h2>Currently in the feed</h2><span class="meta">{len(items)} item{"s" if len(items) != 1 else ""} '
+            "at the last poll</span></div>")
+    if not items:
+        return f'<section class="card">{head}{empty("The feed is empty", "That is the normal, quiet state.")}</section>'
+    now = datetime.now(UTC)
+    rows = []
+    for it in items[:12]:
+        pub = _dt(it.get("pub"))
+        rel = ago((now - pub).total_seconds()) if pub else "no date"
+        rows.append(f'<li><span>{_e(it.get("title") or "(no title)")}</span><span class="faint nowrap">{rel}</span></li>')
+    more = f'<p class="small mute pad">… and {len(items) - 12} more</p>' if len(items) > 12 else ""
+    return f'<section class="card">{head}<ul class="feedlist">{"".join(rows)}</ul>{more}</section>'
+
+
+def alert_paths_card(w, st: dict) -> str:
+    tg = st.get("telegram_configured")
+    dm = st.get("deadman") or {}
+    if not dm.get("configured"):
+        dm_cell = badge("mute", "not configured") + ' <span class="faint">optional, recommended</span>'
+    elif dm.get("last_error"):
+        dm_cell = badge("bad", "failing") + f' <span class="mute">{_e(dm["last_error"])}</span>'
+    elif dm.get("last_ok_age_s") is not None:
+        dm_cell = badge("ok", "pinging") + f' <span class="mute">last ping {ago(dm["last_ok_age_s"])}</span>'
+    else:
+        dm_cell = badge("mute", "starting")
+    cfg = w.cfg()
+    n_dev = len(cfg.devices) if cfg else 0
+    rows = [("Telegram", badge("ok", "configured") if tg else badge("bad", "not configured")),
+            ("Dead-man's switch", dm_cell),
+            ("LED devices", f"{n_dev} configured"),
+            ("Feed", f'polled every {st["poll_interval_s"]:g} s')]
+    dl = "".join(f"<dt>{_e(k)}</dt><dd>{v}</dd>" for k, v in rows)
+    return ('<section class="card"><div class="card-h"><h2>Alert paths</h2><span class="meta">how you find out</span></div>'
+            f'<div class="card-b"><dl class="dl">{dl}</dl><p class="small mute">The public feed must not be the only '
+            "alert path for responders. A dead-man's switch (e.g. healthchecks.io) catches a dead VM, which "
+            "Telegram alerts from this service cannot.</p></div></section>")
+
+
 def dashboard(w, user: bool) -> str:
     ov = overview(w)
     st = ov["st"]
@@ -249,9 +365,12 @@ def dashboard(w, user: bool) -> str:
                           "bad" if bad else "")
                    + tile("Uptime", dur(st["uptime_s"]), "since last start") + "</div>")
     if st is not None:
+        out.insert(2, notices(st))
+        out.append(feed_health_card(w, st))
         out.append('<section class="card"><div class="card-h"><h2>Shelly devices</h2>'
                    '<span class="meta">read-only checks, nothing is switched</span></div>'
                    f'<div class="devs">{device_cards(w, st)}</div></section>')
+        out.append(f'<div class="cols">{feed_now_card(st)}{alert_paths_card(w, st)}</div>')
     out.append(f'<div class="cols">{lag_card(w)}'
                '<section class="card"><div class="card-h"><h2>Latest events</h2><a class="meta" href="/events">View all</a></div>'
                f'<div class="card-b flush">{events_table(w.query("SELECT * FROM events ORDER BY first_seen DESC LIMIT 6"), compact=True)}</div></section></div>')
@@ -399,8 +518,30 @@ def _device_card(i: int, d: dict, is_new: bool, live: dict | None) -> str:
     return (f'<details class="{cls}"{opened}>{head}<div class="dc-b"><div class="fgrid">{"".join(fields)}</div>{extra}</div></details>')
 
 
+def tools_card(w, sess: dict, msg: tuple[str, str] | None = None) -> str:
+    from .commands import TEST_EVENT_MAX_S
+    csrf = f'<input type="hidden" name="csrf" value="{_e(sess["csrf"])}">'
+    alive = w.service_alive()
+    warn = "" if alive else '<div class="notice bad"><div class="txt">The service is not running; these tools need it.</div></div>'
+    if msg:  # shown here, next to the buttons: the redirect lands on #tools
+        warn = (f'<div class="notice {msg[0]}">' + icon("ok" if msg[0] == "ok" else "alert")
+                + f'<div class="txt">{_e(msg[1])} <a href="/alerts">Open Alerts</a></div></div>') + warn
+    return ('<section class="card" id="tools"><div class="card-h"><h2>Maintenance tools</h2>'
+            '<span class="meta">run by the service; results appear under Alerts</span></div><div class="card-b">'
+            f'{warn}<div class="tools">'
+            '<div class="tool"><h3>Send a Telegram test</h3><p>Checks that alert messages actually reach your phone.</p>'
+            f'<form method="post" action="/tools/telegram-test">{csrf}<button class="btn ghost" type="submit">Send test message</button></form></div>'
+            '<div class="tool"><h3>Test event</h3><p>Runs the real dispatch path: <b>every device switches ON</b>, '
+            "then turns itself off after the time below. Use it to verify the LED.</p>"
+            f'<form method="post" action="/tools/test-event">{csrf}'
+            f'<label class="check"><input type="checkbox" name="confirm" value="yes"> I understand this switches all LEDs on now.</label>'
+            f'<div class="row">{_field("duration_s", "Duration", 10, f"1-{TEST_EVENT_MAX_S}", "s")}'
+            f'<button class="btn danger" type="submit">{icon("bolt")} Run test event</button></div></form></div>'
+            "</div></div></section>")
+
+
 def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: bool = False,
-                  form: dict[str, str] | None = None) -> str:
+                  form: dict[str, str] | None = None, tool_msg: tuple[str, str] | None = None) -> str:
     if sess is None:
         body = (page_head("Settings") + '<section class="card"><div class="card-b">'
                 f'<p>{icon("lock")} Log in to view and change settings.</p>'
@@ -454,6 +595,7 @@ def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: 
     out.append('<div class="savebar"><button class="btn" type="submit">Save settings</button>'
                '<a class="btn ghost" href="/settings">Discard changes</a>'
                '<span class="mute">Applying restarts the poller for about a second; the device timers keep running.</span></div></form>')
+    out.append(tools_card(w, sess, tool_msg))  # after </form>: it has its own forms, and HTML forms cannot be nested
     return layout(w, "Settings", "".join(out), "settings", True)
 
 

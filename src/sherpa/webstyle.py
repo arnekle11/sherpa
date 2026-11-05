@@ -127,6 +127,22 @@ footer{max-width:1180px;margin:0 auto;padding:0 20px 28px;color:var(--faint);fon
 .state.ok{color:var(--ok)}.state.bad{color:var(--bad)}.state.unknown{color:var(--muted)}
 .state i{background:currentColor}
 
+/* ---------- lists ---------- */
+.feedlist{list-style:none;margin:0;padding:0}
+.feedlist li{display:flex;justify-content:space-between;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line);font-size:14px}
+.feedlist li:last-child{border-bottom:0}
+.pad{padding:8px 18px;margin:0}
+.dl{display:grid;grid-template-columns:max-content 1fr;gap:10px 18px;margin:0 0 14px;font-size:14px;align-items:center}
+.dl dt{color:var(--muted);font-weight:500}.dl dd{margin:0}
+.tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.tool{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--surface-2)}
+.tool h3{font-size:15px;margin-bottom:4px}.tool p{margin:0 0 12px;color:var(--muted);font-size:14px}
+.tool .row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.tool .row .field{width:140px}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin:0 0 12px}
+.check input{width:16px;height:16px;margin-top:2px;accent-color:var(--bad)}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff}.btn.danger:hover{filter:brightness(.92);background:var(--bad)}
+
 /* ---------- badges ---------- */
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid;white-space:nowrap}
 .badge.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-line)}
@@ -159,6 +175,10 @@ td.det{max-width:360px;color:var(--muted);overflow-wrap:anywhere}
 .chart{width:100%;height:auto;display:block}
 .chart .grid{stroke:var(--line);stroke-width:1}.chart .ax{fill:var(--faint);font-size:11px}
 .chart .bar{fill:var(--primary)}.chart .bar.warn{fill:var(--warn)}.chart .bar.bad{fill:var(--bad)}
+.chart .bar.ok{fill:var(--ok)}.chart .bar.none{fill:var(--faint);opacity:.35}
+.chart .lbl{fill:var(--text);font-size:12px}.chart .val{fill:var(--muted);font-size:12px}
+.chart-h{font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:4px 0 6px}
+.chart-h:not(:first-child){margin-top:20px}
 .stats{display:flex;flex-wrap:wrap;gap:6px 26px;margin-top:12px;font-size:14px}
 .stats span{color:var(--muted)}.stats b{color:var(--text)}
 
@@ -196,6 +216,9 @@ details.devcard.add summary{color:var(--primary)}
 .notice{display:flex;gap:10px;align-items:flex-start;padding:12px 16px;border-radius:10px;border:1px solid;margin-bottom:18px}
 .notice.ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok)}
 .notice.bad{background:var(--bad-bg);border-color:var(--bad-line);color:var(--bad)}
+.notice.warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn)}
+.notice.info{background:var(--info-bg);border-color:var(--info-line);color:var(--info)}
+.notice .ico{flex:none;margin-top:1px}
 .notice .txt{color:var(--text)}.notice ul{margin:6px 0 0 18px;padding:0}
 .notice b{color:inherit}
 
@@ -222,6 +245,7 @@ details.devcard.add summary{color:var(--primary)}
   .savebar{margin:0 -14px;padding:10px 14px}.savebar .mute{display:none}
   .login{margin-top:20px}
   .badge{white-space:normal;text-align:center}td.t{white-space:normal}
+  .chart.wide .ax{font-size:19px}.chart.wide .lbl,.chart.wide .val{font-size:18px}
 }
 @media print{.topbar,.savebar,footer{display:none}body{background:#fff}}
 """

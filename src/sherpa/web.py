@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
-from . import __version__, settings, webpages
+from . import __version__, commands, settings, webexport, webpages, webstats
 from .config import AppCfg, load_config
 from .webstyle import CSS, FAVICON
 
@@ -27,6 +27,18 @@ log = logging.getLogger("sherpa.web")
 SESSION_IDLE_S = 30 * 60
 MAX_BODY = 64 * 1024
 LOGIN_MAX_FAILS, LOGIN_WINDOW_S = 5, 300
+
+TOOL_DONE = {
+    "telegram_test": "Telegram test requested. The message, or a note that Telegram is not configured, appears under Alerts within a few seconds.",
+    "test_event": "Test event requested. Every device switches on for the chosen time; the result appears under Alerts and Events.",
+}
+TOOL_ERR = {
+    "service_down": "The service is not running, so nothing can execute the request.",
+    "confirm": "Tick the confirmation box to run a test event.",
+    "duration": f"Duration must be a whole number from 1 to {commands.TEST_EVENT_MAX_S} seconds.",
+    "write": "Could not queue the request; see the web log.",
+}
+
 
 class Web:
     """Shared state for all requests."""
@@ -39,6 +51,11 @@ class Web:
         cfg = load_config(config_path)
         self.db_path = Path(cfg.db_path)
         self.status_path = self.db_path.parent / "status.json"
+        self.command_dir = commands.command_dir(self.db_path)
+
+    def service_alive(self) -> bool:
+        st = self.status()
+        return bool(st) and time.time() - st["written"] < webpages.STALE_STATUS_S
 
     # ---- data ----
     def cfg(self) -> AppCfg | None:
@@ -174,8 +191,19 @@ def make_handler(w: Web):
                     self._send(200, webpages.events_page(w, bool(sess), q))
                 elif path == "/alerts":
                     self._send(200, webpages.alerts_page(w, bool(sess), q))
+                elif path == "/stats":
+                    self._send(200, webstats.stats_page(w, bool(sess), q))
+                elif path == "/events.csv":
+                    self._send(200, webexport.events_csv(w), "text/csv; charset=utf-8",
+                               {"Content-Disposition": 'attachment; filename="sherpa-events.csv"'})
+                elif path == "/api/status":
+                    self._send(200, webexport.status_json(w), "application/json")
+                elif path == "/metrics":
+                    self._send(200, webexport.metrics(w), "text/plain; version=0.0.4; charset=utf-8")
                 elif path == "/settings":
-                    self._send(200, webpages.settings_page(w, sess))
+                    msg = (("ok", TOOL_DONE[q["done"]]) if q.get("done") in TOOL_DONE else
+                           ("bad", TOOL_ERR[q["err"]]) if q.get("err") in TOOL_ERR else None)
+                    self._send(200, webpages.settings_page(w, sess, tool_msg=msg))
                 elif path == "/login":
                     self._send(200, webpages.login_page(w, disabled=w.password is None))
                 else:
@@ -215,10 +243,40 @@ def make_handler(w: Web):
                         return self._send(400, webpages.settings_page(w, sess, errors=errors, form=form))
                     log.warning("settings changed via web from %s", self.client_address[0])
                     return self._send(200, webpages.settings_page(w, sess, saved=True))
+                if path in ("/tools/telegram-test", "/tools/test-event"):
+                    if sess is None:
+                        return self._redirect("/login")
+                    if not self._csrf_ok(sess, form):
+                        return self._send(403, "bad CSRF token", "text/plain")
+                    return self._redirect(self._tool(path, form))
                 self._send(404, "not found", "text/plain")
             except Exception:
                 log.exception("request failed: %s", path)
                 self._send(500, "internal error", "text/plain")
+
+        def _tool(self, path: str, form: dict) -> str:
+            """Queue an admin command for the service; returns where to redirect."""
+            ip = self.client_address[0]
+            if not w.service_alive():
+                return "/settings?err=service_down#tools"
+            kind, params = "telegram_test", {}
+            if path == "/tools/test-event":
+                if form.get("confirm") != "yes":
+                    return "/settings?err=confirm#tools"
+                try:
+                    d = int(form.get("duration_s", ""))
+                except ValueError:
+                    return "/settings?err=duration#tools"
+                if not 1 <= d <= commands.TEST_EVENT_MAX_S:
+                    return "/settings?err=duration#tools"
+                kind, params = "test_event", {"duration_s": d}
+            try:
+                commands.submit(w.command_dir, kind, ip, **params)
+            except (OSError, ValueError):
+                log.exception("could not queue %s", kind)
+                return "/settings?err=write#tools"
+            log.warning("%s requested via web from %s %s", kind, ip, params or "")
+            return f"/settings?done={kind}#tools"
 
     return Handler
 

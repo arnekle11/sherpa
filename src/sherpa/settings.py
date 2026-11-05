@@ -29,6 +29,7 @@ ALERT_FIELDS = {
     "repeat_min": (float, "Alert repeat", "re-send a still-active alert every N minutes, 0 = once"),
     "heartbeat_min": (float, "Heartbeat", "status message every N minutes, 0 = off"),
     "device_check_interval_s": (float, "Device check", "read-only reachability probe of every Shelly, 0 = off"),
+    "deadman_interval_s": (float, "Dead-man ping", "external ping period, min 10; needs SHERPA_DEADMAN_URL in .env"),
 }
 DEVICE_FIELDS = {
     "name": str, "ip": str, "generation": int, "model": str, "channel": int,
