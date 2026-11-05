@@ -9,7 +9,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import __version__
+from . import __version__, commands
 from .alerts import AlertManager, LogNotifier, Notifier, TelegramNotifier
 from .config import AppCfg, deadman_url_from_env, describe_changes, load_config, telegram_from_env
 from .deadman import Deadman
@@ -57,6 +57,8 @@ class App:
         self.pollstats = PollStats()
         self.last_items: list[dict] = []  # what the feed currently contains, for the web UI
         self._last_poll_done = time.monotonic()
+        self.command_poll_s = 2.0
+        self._last_test_event = float("-inf")
         url = deadman_url_from_env() if deadman is _ENV else deadman
         self.deadman = Deadman(url, cfg.alerts.deadman_interval_s, self._poll_healthy) if url else None
         # counters (also used by selftest)
@@ -80,7 +82,8 @@ class App:
                  asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
                  asyncio.create_task(self._summary_loop(), name="summary"),
                  asyncio.create_task(self._config_watch_loop(), name="config-watch"),
-                 asyncio.create_task(self._stats_loop(), name="poll-stats")]
+                 asyncio.create_task(self._stats_loop(), name="poll-stats"),
+                 asyncio.create_task(self._command_loop(), name="commands")]
         if self.deadman:
             loops.append(asyncio.create_task(self.deadman.run(), name="deadman"))
         try:
@@ -376,6 +379,46 @@ class App:
                 self.restart_requested = True
                 self.stop()
                 return
+
+    # ---------- admin commands (from the web UI) ----------
+    async def _command_loop(self) -> None:
+        directory = commands.command_dir(self.cfg.db_path)
+        while True:
+            await asyncio.sleep(self.command_poll_s)
+            try:
+                for cmd in commands.take(directory):
+                    self._run_command(cmd)
+            except Exception:
+                log.exception("command handling failed")
+
+    def _run_command(self, cmd: dict) -> None:
+        who = cmd["source"]
+        if cmd["kind"] == "telegram_test":
+            log.warning("Telegram test requested from the web UI by %s", who)
+            if isinstance(self.notifier, TelegramNotifier):
+                self.alerts.info(f"Telegram test message, requested from the web UI by {who}. "
+                                 "If you can read this, SHERPA alerts reach you.")
+            else:
+                self.alerts.info(f"Telegram test requested from the web UI by {who}, but Telegram is NOT "
+                                 "configured: alerts only go to the log and the web UI.")
+        elif cmd["kind"] == "test_event":
+            now = time.monotonic()
+            if now - self._last_test_event < commands.TEST_EVENT_COOLDOWN_S:
+                self.alerts.info(f"test event from the web UI ({who}) refused: the previous one was less than "
+                                 f"{commands.TEST_EVENT_COOLDOWN_S} s ago")
+                return
+            self._last_test_event = now
+            d = cmd["duration_s"]
+            log.warning("TEST EVENT requested from the web UI by %s (%d s)", who, d)
+            self.alerts.info(f"test event requested from the web UI by {who}: switching every device ON for {d} s")
+            self._spawn(self._safe_test_event(d), "test-event")
+
+    async def _safe_test_event(self, duration_s: int) -> None:
+        try:
+            await self.send_test_event(duration_s)
+        except Exception as e:
+            log.exception("test event failed")
+            self.alerts.info(f"test event FAILED internally: {e!r}")
 
     # ---------- test event ----------
     async def send_test_event(self, duration_s: int | None = None) -> list:

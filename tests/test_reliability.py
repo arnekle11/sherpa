@@ -110,3 +110,54 @@ def test_startup_probe_and_status_extras(tmp_path):
     assert snap["devices"]["dead"]["ok"] is False and snap["devices"]["good"]["ok"] is True
     rows = sqlite3.connect(tmp_path / "x.db").execute("SELECT SUM(ok) FROM poll_log").fetchone()
     assert rows[0] >= 1  # flushed on shutdown
+
+
+def test_command_validation_and_take(tmp_path):
+    from sherpa import commands
+    import time as _t
+    d = tmp_path / "commands"
+    commands.submit(d, "telegram_test", "192.168.1.165")
+    commands.submit(d, "test_event", "192.168.1.165", duration_s=10)
+    (d / "evil.json").write_text(json.dumps({"kind": "rm -rf", "ts": _t.time()}))
+    (d / "stale.json").write_text(json.dumps({"kind": "telegram_test", "ts": _t.time() - 3600}))
+    (d / "long.json").write_text(json.dumps({"kind": "test_event", "ts": _t.time(), "duration_s": 300}))
+    (d / "garbage.json").write_text("{not json")
+    got = commands.take(d)
+    assert [c["kind"] for c in got] == ["telegram_test", "test_event"] and got[1]["duration_s"] == 10
+    assert list(d.glob("*.json")) == []  # everything claimed or discarded: nothing can run twice
+    assert commands.take(d) == []
+    import pytest
+    with pytest.raises(ValueError):
+        commands.submit(d, "test_event", "x", duration_s=0)
+
+
+def test_web_command_runs_test_event_once_with_cooldown(tmp_path):
+    from sherpa import commands
+
+    async def go():
+        feed, sh = MockFeed().start(), MockShelly(2).start()
+        cfg = AppCfg(feed=FeedCfg(url=feed.url, poll_interval_s=0.5, timeout_s=1),
+                     devices=[DeviceCfg(name="d", ip=sh.hostport, generation=2)],
+                     alerts=AlertsCfg(device_check_interval_s=0), db_path=str(tmp_path / "x.db"))
+        app = App(cfg, telegram=None, deadman=None)
+        app.command_poll_s = 0.1
+        t = asyncio.create_task(app.run())
+        await asyncio.sleep(0.3)
+        d = commands.command_dir(cfg.db_path)
+        commands.submit(d, "test_event", "10.0.0.1", duration_s=5)
+        commands.submit(d, "test_event", "10.0.0.1", duration_s=5)  # second one: refused by cooldown
+        commands.submit(d, "telegram_test", "10.0.0.1")
+        for _ in range(50):
+            if sh.is_on: break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.5)
+        on = sh.is_on
+        app.stop(); await asyncio.wait_for(t, 15)
+        feed.stop(); sh.stop()
+        return on, app.alerts.sent
+    on, sent = asyncio.run(go())
+    assert on
+    assert sum("switching every device ON for 5 s" in m for m in sent) == 1
+    assert any("refused" in m for m in sent) and any("NOT configured" in m for m in sent)
+    rows = sqlite3.connect(tmp_path / "x.db").execute("SELECT state, is_test FROM events").fetchall()
+    assert rows == [("triggered", 1)]
