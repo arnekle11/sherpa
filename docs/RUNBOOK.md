@@ -86,8 +86,16 @@ Saving restarts the service by itself within ~5 s and the restart message lists 
 ### 5.2 Adding a Shelly
 1. Give it a fixed IP (DHCP reservation in the router).
 2. Find its generation: open `http://SHELLY_IP/shelly` in a browser; `"gen": 2` or higher means Gen2.
-3. Settings → **Add a device**: name, address, generation. Save.
+   Also look at `"profile"`: a Shelly Plus/Pro RGBW PM in `"profile": "rgb"` (LED strips) has no relay, so set
+   **Output type** to RGB (or RGBW / Light for those profiles) instead of Switch.
+3. Settings → **Add a device**: name, address, generation, output type. Save.
 4. Run a test event (section 6). Shelly authentication must be **off** (not supported yet).
+
+### 5.2a Controlling the lights by hand (phone)
+Web UI → **Lights** (log in; works on a phone). Per device: **Turn on for** 30 s / 1 min / 5 min / 15 min, and
+**Turn off**. The device keeps the timer, so a manual ON turns itself off even if SHERPA dies. A real emergency
+always overrides: it switches the light on for its normal time, and Off is refused while a real alert may be
+active (its own timer ends it). Every action is logged under Alerts ("light control: ...") and sent to Telegram.
 
 ### 5.3 A Shelly got a new IP address
 Fix the address under Settings → the device, save, then run a test event. Prevent it with a DHCP reservation.

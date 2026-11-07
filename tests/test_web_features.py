@@ -242,3 +242,31 @@ def test_undelivered_alerts_listed(site):
     s.close()
     t = httpx.get(base + "/alerts?f=undelivered").text
     assert "Not delivered" in t and "HTTP 401" in t
+
+
+def test_lights_page_and_light_commands(site):
+    base, tmp, sp = site
+    cdir = commands.command_dir(tmp / "data" / "sherpa.db")
+    assert "Log in to control the lights" in httpx.get(base + "/lights").text
+    with httpx.Client() as c:
+        r = c.post(base + "/tools/light", data={"device": "led-1", "action": "on", "duration_s": "60"})
+        assert r.status_code == 303 and r.headers["location"] == "/login"
+        csrf = _login(c, base)
+        page = c.get(base + "/lights").text
+        assert 'value="led-1"' in page and 'name="duration_s" value="300"' in page and "Turn off" in page
+        assert c.post(base + "/tools/light", data={"csrf": "x"}).status_code == 403
+        for bad in ({"device": "nope", "action": "on", "duration_s": "60"},
+                    {"device": "led-1", "action": "on", "duration_s": "2"},
+                    {"device": "led-1", "action": "on", "duration_s": "99999"},
+                    {"device": "led-1", "action": "on", "duration_s": "x"},
+                    {"device": "led-1", "action": "toggle"}):
+            r = c.post(base + "/tools/light", data={"csrf": csrf, **bad})
+            assert "err=light" in r.headers["location"], bad
+        assert not list(cdir.glob("*.json")) if cdir.exists() else True
+        assert "done=light_on" in c.post(base + "/tools/light", data={"csrf": csrf, "device": "led-1", "action": "on", "duration_s": "60"}).headers["location"]
+        assert "done=light_off" in c.post(base + "/tools/light", data={"csrf": csrf, "device": "led-1", "action": "off"}).headers["location"]
+        got = commands.take(cdir)
+        assert [(x["action"], x.get("duration_s")) for x in got] == [("on", 60), ("off", None)]
+        assert "Switch-on requested" in c.get(base + "/lights?done=light_on").text
+        sp.write_text(json.dumps(_status(written=time.time() - 600)))
+        assert "err=service_down" in c.post(base + "/tools/light", data={"csrf": csrf, "device": "led-1", "action": "off"}).headers["location"]

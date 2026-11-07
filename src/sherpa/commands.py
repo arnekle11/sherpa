@@ -17,10 +17,12 @@ from pathlib import Path
 
 log = logging.getLogger("sherpa.commands")
 
-KINDS = ("telegram_test", "test_event")
+KINDS = ("telegram_test", "test_event", "light")
 MAX_AGE_S = 60            # older command files are ignored
 TEST_EVENT_MAX_S = 60     # test events are short on purpose
 TEST_EVENT_COOLDOWN_S = 30
+LIGHT_ON_MIN_S, LIGHT_ON_MAX_S = 5, 3600  # manual ON always carries a device-side timer
+_DEVICE = re.compile(r"^[A-Za-z0-9 ._\-]{1,40}$")
 _SOURCE = re.compile(r"^(cli|[0-9A-Fa-f:.]{1,45})$")  # "cli" or an IP address, for the audit message
 
 
@@ -51,6 +53,16 @@ def validate(cmd: dict) -> dict | None:
         if not isinstance(d, int) or isinstance(d, bool) or not 1 <= d <= TEST_EVENT_MAX_S:
             return None
         out["duration_s"] = d
+    elif cmd["kind"] == "light":
+        dev, action = cmd.get("device"), cmd.get("action")
+        if not isinstance(dev, str) or not _DEVICE.match(dev) or action not in ("on", "off"):
+            return None
+        out.update(device=dev, action=action)
+        if action == "on":
+            d = cmd.get("duration_s")
+            if not isinstance(d, int) or isinstance(d, bool) or not LIGHT_ON_MIN_S <= d <= LIGHT_ON_MAX_S:
+                return None
+            out["duration_s"] = d
     return out
 
 

@@ -36,6 +36,8 @@ LOGIN_MAX_FAILS, LOGIN_WINDOW_S = 5, 300
 TOOL_DONE = {
     "restored": "The last good settings were restored. The service picks them up within a few seconds.",
     "telegram_test": "Telegram test requested. The message, or a note that Telegram is not configured, appears under Alerts within a few seconds.",
+    "light_on": "Switch-on requested. The light turns itself off when the time is up. The result appears below within a few seconds.",
+    "light_off": "Switch-off requested. The result appears below within a few seconds.",
     "test_event": "Test event requested. Every device switches on for the chosen time; the result appears under Alerts and Events.",
 }
 TOOL_ERR = {
@@ -44,6 +46,9 @@ TOOL_ERR = {
     "service_down": "The service is not running, so nothing can execute the request.",
     "confirm": "Tick the confirmation box to run a test event.",
     "duration": f"Duration must be a whole number from 1 to {commands.TEST_EVENT_MAX_S} seconds.",
+    "light": "That device or duration is not valid.",
+    "light_busy": "A real event was seen recently and its light may still be on. Switching it off now is refused; "
+                  "its own timer turns it off.",
     "write": "Could not queue the request; see the web log.",
     "cooldown": f"Another test event ran less than {commands.TEST_EVENT_COOLDOWN_S} s ago. Wait a moment.",
     "real_event": "A real event was seen recently and its LED may still be on. A test now would cut that alert "
@@ -288,6 +293,10 @@ def make_handler(w: Web):
                     self._send(200, webexport.status_json(w), "application/json")
                 elif path == "/metrics":
                     self._send(200, webexport.metrics(w), "text/plain; version=0.0.4; charset=utf-8")
+                elif path == "/lights":
+                    msg = (("ok", TOOL_DONE[q["done"]]) if q.get("done") in TOOL_DONE else
+                           ("bad", TOOL_ERR[q["err"]]) if q.get("err") in TOOL_ERR else None)
+                    self._send(200, webpages.lights_page(w, sess, msg))
                 elif path == "/settings":
                     if q.get("done") == "saved":
                         self._send(200, webpages.settings_page(w, sess, saved=True))
@@ -354,6 +363,12 @@ def make_handler(w: Web):
                         return self._redirect("/settings?err=restore_failed")
                     log.warning("last good settings restored via web from %s", self.client_address[0])
                     return self._redirect("/settings?done=restored")
+                if path == "/tools/light":
+                    if sess is None:
+                        return self._redirect("/login")
+                    if not self._csrf_ok(sess, form):
+                        return self._send(403, "bad CSRF token", "text/plain")
+                    return self._redirect(self._light(form))
                 if path in ("/tools/telegram-test", "/tools/test-event"):
                     if sess is None:
                         return self._redirect("/login")
@@ -366,6 +381,33 @@ def make_handler(w: Web):
             except Exception:
                 log.exception("request failed: %s", path)
                 self._send(500, "internal error", "text/plain")
+
+        def _light(self, form: dict) -> str:
+            """Queue a manual light command (ON always with a device-side timer)."""
+            ip = self.client_address[0]
+            if not w.service_alive():
+                return "/lights?err=service_down"
+            cfg = w.cfg()
+            name, action = form.get("device", ""), form.get("action", "")
+            if cfg is None or name not in {d.name for d in cfg.devices} or action not in ("on", "off"):
+                return "/lights?err=light"
+            params: dict = {"device": name, "action": action}
+            if action == "on":
+                try:
+                    params["duration_s"] = int(form.get("duration_s", ""))
+                except ValueError:
+                    return "/lights?err=light"
+                if not commands.LIGHT_ON_MIN_S <= params["duration_s"] <= commands.LIGHT_ON_MAX_S:
+                    return "/lights?err=light"
+            elif w.test_event_blocker() == "real_event":  # same window as the service's check, for an instant answer
+                return "/lights?err=light_busy"
+            try:
+                commands.submit(w.command_dir, "light", ip, **params)
+            except (OSError, ValueError):
+                log.exception("could not queue light command")
+                return "/lights?err=write"
+            log.warning("light %s %s requested via web from %s", name, action, ip)
+            return f"/lights?done=light_{action}"
 
         def _tool(self, path: str, form: dict) -> str:
             """Queue an admin command for the service; returns where to redirect."""

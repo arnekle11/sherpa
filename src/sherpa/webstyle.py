@@ -258,7 +258,8 @@ details.devcard.add summary{color:var(--primary)}
   .brand small{display:none}
   .top-right{margin-left:auto}
   .nav{order:3;flex:1 0 100%;margin:0 -14px;padding:0 6px;border-top:1px solid var(--line);overflow:visible}
-  .nav a{flex:1;text-align:center;padding:10px 6px 8px}
+  .nav{padding:0 2px}
+  .nav a{flex:1 1 auto;text-align:center;padding:10px 3px 8px;font-size:13px}
   .wrap{padding:16px 14px 40px}
   .page-head h1{font-size:20px}
   .hero{padding:14px;gap:12px}.hero .ico{width:26px;height:26px}.hero h2{font-size:18px}
@@ -271,6 +272,12 @@ details.devcard.add summary{color:var(--primary)}
   .badge{white-space:normal;text-align:center}td.t{white-space:normal}
   .chart.wide .ax{font-size:19px}.chart.wide .lbl,.chart.wide .val{font-size:18px}
 }
+.lights{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px;margin-bottom:18px}
+.light .lbl{font-size:13px;color:var(--muted);margin-bottom:8px}
+.presets{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.btn.big{min-height:56px;justify-content:center;font-size:16px}
+.offf{margin-top:14px}.offf .btn{width:100%}
+ul.plain{list-style:none;margin:0;padding:0}ul.plain li{padding:8px 0;border-bottom:1px solid var(--line)}ul.plain li:last-child{border:0}
 @media print{.topbar,.savebar,footer{display:none}body{background:#fff}}
 """
 

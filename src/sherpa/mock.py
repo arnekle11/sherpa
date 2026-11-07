@@ -153,13 +153,17 @@ class _ShellyHandler(_Quiet):
                 if q.get("turn") == "on":
                     s._on(float(q["timer"]) if "timer" in q else None)
                     s.on_calls.append(q)
+                elif q.get("turn") == "off":
+                    s.is_on, s.timer_expires, s.timer_duration = False, None, None
                 return self._send(200, json.dumps(s.gen1_status()).encode())
-            if s.gen == 2 and u.path == "/rpc/Switch.Set":
+            if s.gen == 2 and u.path == f"/rpc/{s.rpc}.Set":
                 if q.get("on") == "true":
                     s._on(float(q["toggle_after"]) if "toggle_after" in q else None)
                     s.on_calls.append(q)
+                elif q.get("on") == "false":
+                    s.is_on, s.timer_expires, s.timer_duration = False, None, None
                 return self._send(200, json.dumps({"was_on": False}).encode())
-            if s.gen == 2 and u.path == "/rpc/Switch.GetStatus":
+            if s.gen == 2 and u.path == f"/rpc/{s.rpc}.GetStatus":
                 return self._send(200, json.dumps(s.gen2_status()).encode())
             self._send(404, b'{"error":"not found"}')
 
@@ -167,9 +171,11 @@ class _ShellyHandler(_Quiet):
 class MockShelly(_Server):
     handler_cls = _ShellyHandler
 
-    def __init__(self, gen: int = 1, **kw):
+    def __init__(self, gen: int = 1, component: str = "switch", **kw):
         super().__init__(**kw)
         self.gen = gen
+        # Gen2 answers only for its own component (an rgb-profile Shelly has no Switch.*), like the real device
+        self.rpc = {"switch": "Switch", "light": "Light", "rgb": "RGB", "rgbw": "RGBW"}[component]
         self.is_on = False
         self.timer_duration: float | None = None
         self.timer_expires: float | None = None

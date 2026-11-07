@@ -271,8 +271,8 @@ def _form_from(page: str) -> dict:
             v = re.search(r'value="([^"]*)"', t)
             f[n[1]] = v[1] if v else ""
     for name, body in re.findall(r'<select[^>]*name="([^"]+)"[^>]*>(.*?)</select>', page, re.S):
-        sel = re.search(r'value="(\d)" selected', body)
-        f[name] = sel[1] if sel else "1"
+        sel = re.search(r'value="(\w+)" selected', body)
+        f[name] = sel[1] if sel else re.search(r'value="(\w+)"', body)[1]
     return f
 
 

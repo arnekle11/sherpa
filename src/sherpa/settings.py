@@ -36,13 +36,13 @@ ALERT_FIELDS = {
     "deadman_interval_s": (float, "Dead-man ping", "external ping period, 10-3600; needs SHERPA_DEADMAN_URL in .env"),
 }
 DEVICE_FIELDS = {
-    "name": str, "ip": str, "generation": int, "model": str, "channel": int,
+    "name": str, "ip": str, "generation": int, "model": str, "channel": int, "component": str,
     "on_duration_s": int, "timeout_s": float, "attempts": int, "retry_delay_s": float,
 }
-DEVICE_DEFAULTS = {"name": "", "ip": "", "generation": 1, "model": "", "channel": 0,
+DEVICE_DEFAULTS = {"name": "", "ip": "", "generation": 1, "model": "", "channel": 0, "component": "switch",
                    "on_duration_s": 300, "timeout_s": 3.0, "attempts": 4, "retry_delay_s": 0.5}
 DEVICE_LABELS = {"name": "name", "ip": "address", "generation": "generation", "model": "model label",
-                 "channel": "relay channel", "on_duration_s": "on duration", "timeout_s": "timeout",
+                 "channel": "relay channel", "component": "output type", "on_duration_s": "on duration", "timeout_s": "timeout",
                  "attempts": "attempts", "retry_delay_s": "retry delay"}
 
 # field -> (min, max, zero_allowed)
@@ -164,7 +164,7 @@ def _build(raw: dict, form: dict[str, str]) -> tuple[dict, list[FieldError], lis
         for key, kind in DEVICE_FIELDS.items():
             field = f"dev.{idx}.{key}"
             flabel = f"{label} {DEVICE_LABELS[key]}"
-            text = r.get(key, "")
+            text = r.get(key, "") or (DEVICE_DEFAULTS[key] if key == "component" else "")
             if kind is str:
                 dev[key] = text.strip()
             elif text.strip() == "":

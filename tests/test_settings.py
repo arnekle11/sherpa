@@ -89,3 +89,14 @@ def test_stale_form_rejected(cfgfile):
     cfgfile.write_text(BASE + "log_level: DEBUG\n")
     errs = settings.save(cfgfile, _form(cfgfile), h)
     assert errs == [settings.CONFLICT]
+
+
+def test_device_output_type_is_editable_and_validated(cfgfile):
+    h = settings.config_hash(cfgfile)
+    assert settings.save(cfgfile, _form(cfgfile, **{"dev.0.generation": "2", "dev.0.component": "rgb"}), h) == []
+    assert load_config(cfgfile).devices[0].component == "rgb"
+    errs = settings.save(cfgfile, _form(cfgfile, **{"dev.0.component": "toaster"}), settings.config_hash(cfgfile))
+    assert errs and errs[0].field == "dev.0.component"
+    f = _form(cfgfile)
+    del f["dev.0.component"]  # forms from before this field existed still save
+    assert settings.save(cfgfile, f, settings.config_hash(cfgfile)) == []

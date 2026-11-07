@@ -3,9 +3,11 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from sherpa.app import App
 from sherpa.config import AlertsCfg, AppCfg, DeviceCfg, FeedCfg, describe_changes
@@ -161,3 +163,53 @@ def test_web_command_runs_test_event_once_with_cooldown(tmp_path):
     assert any("refused" in m for m in sent) and any("NOT configured" in m for m in sent)
     rows = sqlite3.connect(tmp_path / "x.db").execute("SELECT state, is_test FROM events").fetchall()
     assert rows == [("triggered", 1)]
+
+
+def test_light_command_validation():
+    from sherpa import commands
+    ok = {"kind": "light", "ts": time.time(), "source": "cli", "device": "led-1", "action": "on", "duration_s": 60}
+    assert commands.validate(dict(ok))["duration_s"] == 60
+    assert commands.validate({**ok, "action": "off", "duration_s": None})["action"] == "off"
+    for bad in ({"duration_s": 4}, {"duration_s": 3601}, {"duration_s": True}, {"duration_s": None},
+                {"action": "toggle"}, {"device": "../x"}, {"device": ""}):
+        assert commands.validate({**ok, **bad}) is None, bad
+
+
+@pytest.mark.parametrize("gen,component", [(1, "switch"), (2, "switch"), (2, "rgb")])
+def test_manual_light_on_has_timer_off_works_and_real_alert_blocks_off(tmp_path, gen, component):
+    from sherpa import commands
+
+    async def go():
+        feed, sh = MockFeed().start(), MockShelly(gen, component=component).start()
+        cfg = AppCfg(feed=FeedCfg(url=feed.url, poll_interval_s=0.5, timeout_s=1),
+                     devices=[DeviceCfg(name="d", ip=sh.hostport, generation=gen, component=component)],
+                     alerts=AlertsCfg(device_check_interval_s=0), db_path=str(tmp_path / "x.db"))
+        app = App(cfg, telegram=None, deadman=None)
+        app.command_poll_s = 0.1
+        t = asyncio.create_task(app.run())
+        await asyncio.sleep(0.3)
+        d = commands.command_dir(cfg.db_path)
+        commands.submit(d, "light", "10.0.0.2", device="d", action="on", duration_s=120)
+        for _ in range(50):
+            if sh.is_on: break
+            await asyncio.sleep(0.05)
+        on, timer = sh.is_on, sh.timer_duration
+        commands.submit(d, "light", "10.0.0.2", device="d", action="off")
+        for _ in range(50):
+            if not sh.is_on: break
+            await asyncio.sleep(0.05)
+        off = not sh.is_on
+        # a real alert is in progress: OFF must be refused and the light stay on
+        feed.add_item("Požar"); await asyncio.sleep(1.5)
+        real_on = sh.is_on
+        commands.submit(d, "light", "10.0.0.2", device="d", action="off")
+        await asyncio.sleep(0.6)
+        still_on = sh.is_on
+        app.stop(); await asyncio.wait_for(t, 15)
+        feed.stop(); sh.stop()
+        return on, timer, off, real_on, still_on, app.alerts.sent
+    on, timer, off, real_on, still_on, sent = asyncio.run(go())
+    assert on and timer == 120 and off
+    assert real_on and still_on
+    assert any("switched ON for 120 s" in m for m in sent) and any("switched OFF" in m for m in sent)
+    assert any("OFF for d" in m and "refused" in m for m in sent)

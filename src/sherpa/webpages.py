@@ -16,7 +16,8 @@ STALE_STATUS_S = 30
 _e = html.escape
 
 NAV = (("dashboard", "/", "Dashboard"), ("events", "/events", "Events"),
-       ("alerts", "/alerts", "Alerts"), ("stats", "/stats", "Stats"), ("settings", "/settings", "Settings"))
+       ("alerts", "/alerts", "Alerts"), ("lights", "/lights", "Lights"), ("stats", "/stats", "Stats"),
+       ("settings", "/settings", "Settings"))
 
 ALERT_LABELS = {
     "feed-down": "Feed unreachable", "feed-structure": "Feed structure changed",
@@ -656,6 +657,7 @@ DEV_LABELS = {
     "name": ("Name", ""), "ip": ("Address", "IP or host, optionally :port"),
     "generation": ("Generation", "from http://IP/shelly: \"gen\": 2, 3 or 4 = Gen2 or newer"),
     "model": ("Model label", "free text"), "channel": ("Relay channel", "usually 0"),
+    "component": ("Output type", "Switch for relays; RGB, RGBW or Light if /shelly shows \"profile\": \"rgb\" / \"light\""),
     "on_duration_s": ("On duration", "device-side auto-off timer"), "timeout_s": ("Timeout", "per attempt"),
     "attempts": ("Attempts", "tries including the first"), "retry_delay_s": ("Retry delay", "first back-off step"),
 }
@@ -684,6 +686,11 @@ def _device_card(i: int, d: dict, is_new: bool, live: dict | None, ferr: dict[st
                            for g, n in ((1, "Gen1"), (2, "Gen2 or newer")))
             fields.append(f'<div class="field"><label for="dev.{i}.generation">{label}</label>'
                           f'<select id="dev.{i}.generation" name="dev.{i}.generation">{opts}</select><div class="hint">{hint}</div></div>')
+        elif k == "component":
+            opts = "".join(f'<option value="{c}"{" selected" if str(d[k]) == c else ""}>{n}</option>'
+                           for c, n in (("switch", "Switch (relay)"), ("rgb", "RGB"), ("rgbw", "RGBW"), ("light", "Light (dimmer)")))
+            fields.append(f'<div class="field"><label for="dev.{i}.component">{label}</label>'
+                          f'<select id="dev.{i}.component" name="dev.{i}.component">{opts}</select><div class="hint">{hint}</div></div>')
         else:
             fields.append(_field(f"dev.{i}.{k}", label, d[k], hint, DEV_UNITS.get(k, ""), ferr.get(f"dev.{i}.{k}"),
                                  numeric=settings.DEVICE_FIELDS[k] is not str))
@@ -737,6 +744,51 @@ def tools_card(w, sess: dict, msg: tuple[str, str] | None = None) -> str:
             f'<div class="row">{_field("duration_s", "Duration", 10, f"1-{TEST_EVENT_MAX_S}", "s")}'
             f'<button class="btn danger" type="submit">{icon("bolt")} Run test event</button></div></form></div>'
             "</div></div></section>")
+
+
+LIGHT_PRESETS = ((30, "30 s"), (60, "1 min"), (300, "5 min"), (900, "15 min"))
+
+
+def lights_page(w, sess: dict | None, msg: tuple[str, str] | None = None) -> str:
+    """Manual control of every light, made for a phone: big buttons, one tap. ON always carries the
+    device-side timer; OFF is refused by the service while a real alert may be active."""
+    if sess is None:
+        return layout(w, "Lights", page_head("Lights") + '<section class="card"><div class="card-b">'
+                      f'<p>{icon("lock")} Log in to control the lights.</p><p><a class="btn" href="/login">Log in</a></p>'
+                      "</div></section>", "lights", False)
+    cfg = w.cfg()
+    csrf = f'<input type="hidden" name="csrf" value="{_e(sess["csrf"])}">'
+    st = w.status() or {}
+    alive = w.service_alive()
+    notes = ""
+    if msg:
+        notes += (f'<div class="notice {msg[0]}">' + icon("ok" if msg[0] == "ok" else "alert")
+                  + f'<div class="txt">{_e(msg[1])}</div></div>')
+    if not alive:
+        notes += '<div class="notice bad"><div class="txt">The service is not running, so the lights cannot be controlled from here.</div></div>'
+    cards = []
+    for d in (cfg.devices if cfg else []):
+        live = (st.get("devices") or {}).get(d.name, {})
+        reach = badge("ok", "reachable") if live.get("ok") else (badge("bad", "not reachable") if live.get("ok") is False
+                                                                 else badge("mute", "not checked yet"))
+        on_btns = "".join(f'<button class="btn big" type="submit" name="duration_s" value="{s}">{icon("bolt")} {lbl}</button>'
+                          for s, lbl in LIGHT_PRESETS)
+        cards.append(
+            f'<section class="card light"><div class="card-h"><h2>{_e(d.name)}</h2>{reach}</div><div class="card-b">'
+            f'<form method="post" action="/tools/light">{csrf}<input type="hidden" name="device" value="{_e(d.name)}">'
+            f'<input type="hidden" name="action" value="on"><div class="lbl">Turn on for</div>'
+            f'<div class="presets">{on_btns}</div></form>'
+            f'<form method="post" action="/tools/light" class="offf">{csrf}<input type="hidden" name="device" value="{_e(d.name)}">'
+            f'<input type="hidden" name="action" value="off"><button class="btn big ghost" type="submit">Turn off</button></form>'
+            "</div></section>")
+    rows = w.query("SELECT ts, text FROM alert_log WHERE text LIKE '%light control:%' ORDER BY id DESC LIMIT 8")
+    recent = "".join(f'<li><div class="mute small">{when(r["ts"])}</div>{_e(_EMOJI.sub("", r["text"]))}</li>'
+                     for r in rows) or '<li class="mute">Nothing yet.</li>'
+    note = ("A real emergency overrides these buttons: it switches the lights on for their normal time. "
+            "Manual 'on' always turns itself off.")
+    return layout(w, "Lights", page_head("Lights", note) + notes + '<div class="lights">' + "".join(cards) + "</div>"
+                  '<section class="card"><div class="card-h"><h2>Recent light actions</h2></div><div class="card-b">'
+                  f'<ul class="plain">{recent}</ul></div></section>', "lights", True)
 
 
 def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: bool = False,

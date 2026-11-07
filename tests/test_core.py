@@ -133,3 +133,22 @@ def test_unknown_config_key_rejected(tmp_path):
     p.write_text("feed: {url: http://x, pol_interval_s: 1}\ndevices: [{name: a, ip: 1.2.3.4, generation: 1}]\n")
     with pytest.raises(Exception):
         load_config(p)
+
+
+@pytest.mark.parametrize("component", ["rgb", "rgbw", "light"])
+def test_gen2_light_components_switch_on_with_device_timer(component):
+    """An rgb-profile Shelly (e.g. Plus RGBW PM) has no Switch.*; the adapter must use its own component."""
+    async def go():
+        s = MockShelly(2, component=component).start()
+        try:
+            async with httpx.AsyncClient(trust_env=False) as c:
+                r = await make_device(DeviceCfg(name="d", ip=s.hostport, generation=2, component=component,
+                                                attempts=1, retry_delay_s=0.01, on_duration_s=60), c).activate()
+                assert r.ok and s.is_on and s.timer_duration == 60
+                # default component against this device fails visibly instead of pretending
+                bad = await make_device(DeviceCfg(name="d", ip=s.hostport, generation=2,
+                                                  attempts=1, retry_delay_s=0.01), c).activate()
+                assert not bad.ok
+        finally:
+            s.stop()
+    asyncio.run(go())

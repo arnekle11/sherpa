@@ -13,6 +13,8 @@ mkdir config && cp config.example.yaml config/config.yaml   # set each device's 
 cp .env.example .env && chmod 600 .env                     # Telegram token + chat id, web password, dead-man URL
 sudo timedatectl set-ntp true                              # the startup age filter needs a correct clock
 ```
+Output type: if `/shelly` shows `"profile": "rgb"` (e.g. Plus RGBW PM) set `component: rgb` on the device.
+
 Shelly generation: open `http://SHELLY_IP/shelly`. A `"gen": 2`, `3` or `4` field means `generation: 2`
 (same RPC API); no `gen` field means Gen1. Shelly authentication must be off.
 

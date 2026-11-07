@@ -71,7 +71,26 @@ class ShellyDevice(ABC):
     async def _send_on(self, duration_s: int) -> None: ...
 
     @abstractmethod
+    async def _send_off(self) -> None: ...
+
+    @abstractmethod
     async def read_state(self) -> DeviceState: ...
+
+    async def deactivate(self) -> DeviceResult:
+        """Switch off (manual control only; an alert never calls this); retry; verify by read-back."""
+        t0 = time.monotonic()
+        last_err = "unknown"
+        for attempt in range(1, self.cfg.attempts + 1):
+            try:
+                await self._send_off()
+                if not (await self.read_state()).on:
+                    return DeviceResult(self.name, True, attempt, "off", time.monotonic() - t0)
+                last_err = "read-back mismatch (still on)"
+            except DeviceError as e:
+                last_err = str(e)
+            if attempt < self.cfg.attempts:
+                await asyncio.sleep(min(self.cfg.retry_delay_s * (2 ** (attempt - 1)), 5.0))
+        return DeviceResult(self.name, False, self.cfg.attempts, last_err, time.monotonic() - t0)
 
     async def activate(self, duration_s: int | None = None) -> DeviceResult:
         """Switch on with device-side timer; retry; verify by read-back."""
@@ -99,6 +118,9 @@ class ShellyGen1(ShellyDevice):
     async def _send_on(self, duration_s: int) -> None:
         await self._get(f"/relay/{self.cfg.channel}", {"turn": "on", "timer": duration_s})
 
+    async def _send_off(self) -> None:
+        await self._get(f"/relay/{self.cfg.channel}", {"turn": "off"})
+
     async def read_state(self) -> DeviceState:
         d = await self._get(f"/relay/{self.cfg.channel}")
         if "ison" not in d:
@@ -108,13 +130,20 @@ class ShellyGen1(ShellyDevice):
 
 class ShellyGen2(ShellyDevice):
     async def _send_on(self, duration_s: int) -> None:
-        await self._get("/rpc/Switch.Set",
+        await self._get(f"/rpc/{self._rpc}.Set",
                         {"id": self.cfg.channel, "on": "true", "toggle_after": duration_s})
 
+    async def _send_off(self) -> None:
+        await self._get(f"/rpc/{self._rpc}.Set", {"id": self.cfg.channel, "on": "false"})
+
+    @property
+    def _rpc(self) -> str:
+        return {"switch": "Switch", "light": "Light", "rgb": "RGB", "rgbw": "RGBW"}[self.cfg.component]
+
     async def read_state(self) -> DeviceState:
-        d = await self._get("/rpc/Switch.GetStatus", {"id": self.cfg.channel})
+        d = await self._get(f"/rpc/{self._rpc}.GetStatus", {"id": self.cfg.channel})
         if "output" not in d:
-            raise DeviceError("no 'output' in response (is this a Gen2 switch?)")
+            raise DeviceError(f"no 'output' in response (does this Shelly have a {self.cfg.component} component?)")
         # timer_duration is only present while a timer is armed.
         dur = d.get("timer_duration")
         return DeviceState(bool(d["output"]), bool(dur), dur)

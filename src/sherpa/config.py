@@ -30,6 +30,8 @@ class DeviceCfg(_Base):
     generation: Literal[1, 2]
     model: str = ""
     channel: int = Field(0, ge=0)
+    # Gen2 component that drives the output: switch (relays), or light/rgb/rgbw (dimmer and LED-strip profiles)
+    component: Literal["switch", "light", "rgb", "rgbw"] = "switch"
     on_duration_s: int = Field(300, ge=1)
     timeout_s: float = Field(3.0, gt=0)
     attempts: int = Field(4, ge=1)

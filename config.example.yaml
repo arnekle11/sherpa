@@ -14,6 +14,7 @@ devices:
     generation: 1           # 1 = Gen1 (Shelly 1/1PM/2.5...); 2 = Gen2 or newer (Plus, Pro, Gen3, Gen4: same RPC API)
     model: "Shelly 1"       # free-text label only
     channel: 0
+    component: switch       # Gen2 only: switch | rgb | rgbw | light (use rgb/rgbw/light if /shelly shows such a "profile")
     on_duration_s: 300      # device-side auto-off timer, survives app death
     timeout_s: 3
     attempts: 4             # total tries incl. the first

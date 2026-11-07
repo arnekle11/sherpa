@@ -578,6 +578,8 @@ class App:
             else:
                 self.alerts.info(f"Telegram test requested from {who}, but Telegram is NOT "
                                  "configured: alerts only go to the log and the web UI.")
+        elif cmd["kind"] == "light":
+            self._spawn(self._safe_light(cmd, who), "light")
         elif cmd["kind"] == "test_event":
             if self._test_task and not self._test_task.done():
                 self.alerts.info(f"test event from {who} refused: a test event is already running")
@@ -585,6 +587,34 @@ class App:
             d = cmd["duration_s"]
             log.warning("TEST EVENT requested from %s (%d s)", who, d)
             self._test_task = self._spawn(self._safe_test_event(d, who), "test-event")
+
+    async def _safe_light(self, cmd: dict, who: str) -> None:
+        name, action = cmd["device"], cmd["action"]
+        dev = next((d for d in self.devices if d.name == name), None)
+        try:
+            if dev is None:
+                return self.alerts.info(f"light control: unknown device '{name}' (requested from {who})")
+            if action == "off":
+                window = max(d.on_duration_s for d in self.cfg.devices) + 30
+                last_real = self.store.last_event_time(test=False)
+                if (last_real and (datetime.now(UTC) - last_real).total_seconds() < window) \
+                        or time.monotonic() - self._last_real_dispatch < window:
+                    return self.alerts.info(f"light control: OFF for {name} from {who} refused: a real alert may "
+                                            "still be active. Its timer turns the light off by itself.")
+                r = await dev.deactivate()
+                log.warning("light %s OFF from %s: %s", name, who, "ok" if r.ok else r.detail)
+                return self.alerts.info(f"light control: {name} switched OFF by {who}" if r.ok else
+                                        f"light control: {name} OFF FAILED ({r.detail})")
+            seq = self._real_dispatches
+            r = await dev.activate(cmd["duration_s"])
+            if self._real_dispatches != seq:  # a real event overlapped: its timer must have the last word
+                self._spawn(self._rearm_after_test(), "rearm")
+            log.warning("light %s ON %d s from %s: %s", name, cmd["duration_s"], who, "ok" if r.ok else r.detail)
+            self.alerts.info(f"light control: {name} switched ON for {cmd['duration_s']} s by {who}" if r.ok else
+                             f"light control: {name} ON FAILED ({r.detail})")
+        except Exception as e:
+            log.exception("light control failed")
+            self.alerts.info(f"light control: {name} failed internally: {e!r}")
 
     async def _safe_test_event(self, duration_s: int, who: str) -> None:
         try:
