@@ -270,3 +270,67 @@ def test_lights_page_and_light_commands(site):
         assert "Switch-on requested" in c.get(base + "/lights?done=light_on").text
         sp.write_text(json.dumps(_status(written=time.time() - 600)))
         assert "err=service_down" in c.post(base + "/tools/light", data={"csrf": csrf, "device": "led-1", "action": "off"}).headers["location"]
+
+
+def _set_device(tmp, **dev):
+    path = tmp / "config.yaml"
+    cfg = yaml.safe_load(path.read_text())
+    cfg["devices"][0].update(dev)
+    path.write_text(yaml.safe_dump(cfg))
+
+
+def test_lights_scene_form_offers_only_what_the_output_can_do_and_queues_scenes(site):
+    base, tmp, sp = site
+    cdir = commands.command_dir(tmp / "data" / "sherpa.db")
+    with httpx.Client() as c:
+        csrf = _login(c, base)
+        # a relay (Gen1): no colour picker, no swatches, only on/off effects
+        page = c.get(base + "/lights").text
+        assert "Colour &amp; effects" in page and 'type="color"' not in page and 'class="sw"' not in page
+        assert 'value="blink"' in page and 'value="rainbow"' not in page and 'value="hold"' in page
+        post = lambda **f: c.post(base + "/tools/light", data={"csrf": csrf, "device": "led-1", **f}).headers["location"]
+        assert "err=light" in post(action="scene", effect="rainbow", duration_s="hold", speed="2")
+        assert "err=light" in post(action="scene", effect="blink", duration_s="hold", speed="9")
+        assert "err=light" in post(action="scene", effect="blink", duration_s="0")
+        assert "done=light_effect" in post(action="scene", effect="blink", duration_s="300", speed="3")
+        assert "done=light_on" in post(action="on", duration_s="hold")
+        # a colour output (Plus RGBW PM, rgb profile)
+        _set_device(tmp, generation=2, component="rgb")
+        page = c.get(base + "/lights").text
+        assert 'type="color"' in page and page.count('class="sw"') == 9 and 'value="rainbow"' in page
+        assert 'value="breathe"' in page and 'type="range"' in page
+        assert "done=light_effect" in post(action="scene", effect="disco", duration_s="hold", speed="2", color="#00ff00", brightness="70")
+        assert "done=light_on" in post(action="on", duration_s="hold", color="#2962ff")
+        assert "err=light" in post(action="on", duration_s="hold", color="blue")
+        assert "err=light" in post(action="scene", effect="solid", duration_s="60", brightness="500")
+        got = commands.take(cdir)
+        assert [(x["action"], x.get("effect"), x.get("hold"), x.get("duration_s"), x.get("color"), x.get("brightness"))
+                for x in got] == [
+            ("effect", "blink", None, 300, None, None), ("on", None, True, None, None, None),
+            ("effect", "disco", True, None, "#00ff00", 70), ("on", None, True, None, "#2962ff", None)]
+        # a running scene is shown from status.json
+        sp.write_text(json.dumps(_status(lights={"led-1": {"effect": "disco", "label": "Disco", "hold": True,
+                                                            "since": time.time(), "ends": None}})))
+        assert "Running: Disco" in c.get(base + "/lights").text
+
+
+def test_alert_colour_setting_is_validated_and_saved(site):
+    from sherpa import settings
+    from sherpa.config import load_config
+    base, tmp, _ = site
+    path = tmp / "config.yaml"
+    _set_device(tmp, generation=2, component="rgb")
+    cfg = load_config(path)
+    f = {"feed.poll_interval_s": "2", "feed.max_age_min": str(cfg.feed.max_age_min), "feed.down_after_s": str(cfg.feed.down_after_s),
+         "alerts.repeat_min": str(cfg.alerts.repeat_min), "alerts.heartbeat_min": "0", "alerts.device_check_interval_s": "300",
+         "dev.1.new": "1", "dev.1.name": ""}
+    for k in settings.DEVICE_FIELDS:
+        f[f"dev.0.{k}"] = str(getattr(cfg.devices[0], k))
+    bad = settings.save(path, {**f, "dev.0.alert_color": "red"}, settings.config_hash(path))
+    assert bad and bad[0].field == "dev.0.alert_color"
+    assert settings.save(path, {**f, "dev.0.alert_brightness": "101"}, settings.config_hash(path))
+    assert settings.save(path, {**f, "dev.0.alert_color": "#FF0000", "dev.0.alert_brightness": "100"}, settings.config_hash(path)) == []
+    d = load_config(path).devices[0]
+    assert d.alert_color == "#FF0000" and d.alert_brightness == 100
+    del f["dev.0.alert_color"], f["dev.0.alert_brightness"]  # forms from before these fields still save
+    assert settings.save(path, f, settings.config_hash(path)) == []

@@ -136,6 +136,35 @@ class MockFeed(_Server):
 
 # ------------------------------------------------------------------ shelly
 class _ShellyHandler(_Quiet):
+    def do_POST(self):
+        s: MockShelly = self.server.owner  # type: ignore[attr-defined]
+        u = urlparse(self.path)
+        n = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            return self._send(400, b'{"error":"bad json"}')
+        with s.lock:
+            s.requests.append((u.path, body))
+            if s.dead or s.fail_next > 0:
+                if s.fail_next > 0:
+                    s.fail_next -= 1
+                return self._send(500, b'{"error":"mock failure"}')
+            s._expire()
+            if s.gen == 2 and u.path == f"/rpc/{s.rpc}.Set":
+                s.frames.append(body)
+                if "rgb" in body:
+                    s.rgb = list(body["rgb"])
+                if "brightness" in body:
+                    s.brightness = body["brightness"]
+                if body.get("on") is True:
+                    s._on(float(body["toggle_after"]) if "toggle_after" in body else None)
+                    s.on_calls.append(body)
+                elif body.get("on") is False:
+                    s.is_on, s.timer_expires, s.timer_duration = False, None, None
+                return self._send(200, json.dumps({"was_on": False}).encode())
+            self._send(404, b'{"error":"not found"}')
+
     def do_GET(self):
         s: MockShelly = self.server.owner  # type: ignore[attr-defined]
         u = urlparse(self.path)
@@ -181,6 +210,9 @@ class MockShelly(_Server):
         self.timer_expires: float | None = None
         self.requests: list = []
         self.on_calls: list[dict] = []
+        self.frames: list[dict] = []          # every POSTed Set, in order (manual scenes)
+        self.rgb = [255, 0, 0]
+        self.brightness = 8
         self.fail_next = 0
         self.dead = False
         self.delay_s = 0.0
@@ -204,6 +236,8 @@ class MockShelly(_Server):
 
     def gen2_status(self) -> dict:
         d = {"id": 0, "source": "HTTP", "output": self.is_on}
+        if self.rpc != "Switch":
+            d.update(rgb=list(self.rgb), brightness=self.brightness)
         if self.timer_expires is not None:
             d.update(timer_started_at=time.time(), timer_duration=float(self.timer_duration))
         return d

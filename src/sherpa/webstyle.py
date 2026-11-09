@@ -281,4 +281,16 @@ ul.plain{list-style:none;margin:0;padding:0}ul.plain li{padding:8px 0;border-bot
 @media print{.topbar,.savebar,footer{display:none}body{background:#fff}}
 """
 
+SWATCHES = ("#ff0000", "#ff7a00", "#ffd000", "#00c853", "#00b8d4", "#2962ff", "#aa00ff", "#ff4081", "#ffffff")
+CSS += "".join(f'.sw[value="{c}"]{{background:{c}}}' for c in SWATCHES)  # no inline styles: the CSP forbids them
+CSS += """
+.presets .hold{grid-column:1/-1}.swatches{margin-top:4px}.light form+form{margin-top:16px}
+.swatches{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+.sw{width:44px;height:44px;border-radius:50%;border:2px solid var(--line-2);cursor:pointer;padding:0}
+.sw:hover,.sw:focus-visible{border-color:var(--text)}
+details.more{margin:6px 0 16px}details.more>summary{cursor:pointer;font-weight:600;padding:10px 0;min-height:44px;display:flex;align-items:center}
+.scene .field{margin-bottom:12px}.scene .btn{width:100%}
+.colorin{width:100%;height:48px;padding:2px;border-radius:8px;border:1px solid var(--line-2);background:var(--surface)}
+.range{width:100%;height:32px}
+"""
 CSS_VERSION = hashlib.sha1(CSS.encode()).hexdigest()[:10]  # cache-buster: the URL changes whenever the CSS does

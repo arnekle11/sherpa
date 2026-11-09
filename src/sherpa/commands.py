@@ -21,7 +21,8 @@ KINDS = ("telegram_test", "test_event", "light")
 MAX_AGE_S = 60            # older command files are ignored
 TEST_EVENT_MAX_S = 60     # test events are short on purpose
 TEST_EVENT_COOLDOWN_S = 30
-LIGHT_ON_MIN_S, LIGHT_ON_MAX_S = 5, 3600  # manual ON always carries a device-side timer
+LIGHT_ON_MIN_S, LIGHT_ON_MAX_S = 5, 43200  # manual ON always carries a device-side timer (renewed for 'hold')
+_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _DEVICE = re.compile(r"^[A-Za-z0-9 ._\-]{1,40}$")
 _SOURCE = re.compile(r"^(cli|[0-9A-Fa-f:.]{1,45})$")  # "cli" or an IP address, for the audit message
 
@@ -55,14 +56,34 @@ def validate(cmd: dict) -> dict | None:
         out["duration_s"] = d
     elif cmd["kind"] == "light":
         dev, action = cmd.get("device"), cmd.get("action")
-        if not isinstance(dev, str) or not _DEVICE.match(dev) or action not in ("on", "off"):
+        if not isinstance(dev, str) or not _DEVICE.match(dev) or action not in ("on", "off", "effect"):
             return None
         out.update(device=dev, action=action)
-        if action == "on":
-            d = cmd.get("duration_s")
+        if action == "off":
+            return out
+        hold, d = cmd.get("hold") is True, cmd.get("duration_s")
+        if hold:
+            if d is not None:
+                return None
+            out["hold"] = True
+        else:
             if not isinstance(d, int) or isinstance(d, bool) or not LIGHT_ON_MIN_S <= d <= LIGHT_ON_MAX_S:
                 return None
             out["duration_s"] = d
+        if (c := cmd.get("color")) is not None:
+            if not isinstance(c, str) or not _COLOR.match(c):
+                return None
+            out["color"] = c.lower()
+        if (b := cmd.get("brightness")) is not None:
+            if not isinstance(b, int) or isinstance(b, bool) or not 1 <= b <= 100:
+                return None
+            out["brightness"] = b
+        if action == "effect":
+            from .lights import EFFECTS
+            sp = cmd.get("speed", 2)
+            if cmd.get("effect") not in EFFECTS or not isinstance(sp, int) or isinstance(sp, bool) or sp not in (1, 2, 3):
+                return None
+            out.update(effect=cmd["effect"], speed=sp)
     return out
 
 

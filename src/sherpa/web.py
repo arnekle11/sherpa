@@ -21,8 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
-from . import BUILD, commands, settings, webexport, webpages, webstats
+from . import BUILD, commands, lights, settings, webexport, webpages, webstats
 from .config import AppCfg, load_config, load_config_with_fallback
+from .devices import capability_of
 from .webstyle import CSS, favicon
 
 log = logging.getLogger("sherpa.web")
@@ -37,6 +38,7 @@ TOOL_DONE = {
     "restored": "The last good settings were restored. The service picks them up within a few seconds.",
     "telegram_test": "Telegram test requested. The message, or a note that Telegram is not configured, appears under Alerts within a few seconds.",
     "light_on": "Switch-on requested. The light turns itself off when the time is up. The result appears below within a few seconds.",
+    "light_effect": "Effect requested. It runs until the time is up or you turn it off; the result appears below within a few seconds.",
     "light_off": "Switch-off requested. The result appears below within a few seconds.",
     "test_event": "Test event requested. Every device switches on for the chosen time; the result appears under Alerts and Events.",
 }
@@ -383,24 +385,40 @@ def make_handler(w: Web):
                 self._send(500, "internal error", "text/plain")
 
         def _light(self, form: dict) -> str:
-            """Queue a manual light command (ON always with a device-side timer)."""
+            """Queue a manual light command: plain/colour ON, an effect, or OFF. ON always has a device-side timer."""
             ip = self.client_address[0]
             if not w.service_alive():
                 return "/lights?err=service_down"
             cfg = w.cfg()
-            name, action = form.get("device", ""), form.get("action", "")
-            if cfg is None or name not in {d.name for d in cfg.devices} or action not in ("on", "off"):
+            name, action, effect = form.get("device", ""), form.get("action", ""), form.get("effect", "")
+            dev = next((d for d in cfg.devices if d.name == name), None) if cfg else None
+            if action == "scene":  # the colour & effects form: "solid" is a coloured ON
+                action, effect = ("on", "solid") if effect in ("", "solid") else ("effect", effect)
+            if dev is None or action not in ("on", "off", "effect"):
                 return "/lights?err=light"
+            cap = capability_of(dev)
             params: dict = {"device": name, "action": action}
-            if action == "on":
+            if action != "off":
+                dur = form.get("duration_s", "")
                 try:
-                    params["duration_s"] = int(form.get("duration_s", ""))
+                    if dur == "hold":
+                        params["hold"] = True
+                    else:
+                        params["duration_s"] = int(dur)
+                    if cap == "color" and form.get("color"):
+                        params["color"] = form["color"]
+                    if cap != "onoff" and form.get("brightness"):
+                        params["brightness"] = int(form["brightness"])
+                    if action == "effect":
+                        if not lights.supports(cap, effect):
+                            return "/lights?err=light"
+                        params.update(effect=effect, speed=int(form.get("speed", "2")))
                 except ValueError:
                     return "/lights?err=light"
-                if not commands.LIGHT_ON_MIN_S <= params["duration_s"] <= commands.LIGHT_ON_MAX_S:
-                    return "/lights?err=light"
-            elif w.test_event_blocker() == "real_event":  # same window as the service's check, for an instant answer
+            if w.test_event_blocker() == "real_event":  # same window as the service's check, for an instant answer
                 return "/lights?err=light_busy"
+            if commands.validate({"kind": "light", "ts": time.time(), "source": "cli", **params}) is None:
+                return "/lights?err=light"
             try:
                 commands.submit(w.command_dir, "light", ip, **params)
             except (OSError, ValueError):

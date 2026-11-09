@@ -10,7 +10,7 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - `feed.py` fetch (keep-alive, hard timeout, size cap) + strict parse; `store.py` SQLite
 - `devices.py` Gen1/Gen2 adapters (ON + timer + read-back); `dispatcher.py` parallel fan-out
 - `alerts.py` state-based alerts, Telegram; `mock.py` mock feed/Shelly/Telegram; `selftest.py`; `cli.py`
-- `pollstats.py` per-minute poll history; `deadman.py` optional external ping; `commands.py` web -> service command queue (test event, Telegram test)
+- `lights.py` manual colour/effect scenes; `pollstats.py` per-minute poll history; `deadman.py` optional external ping; `commands.py` web -> service command queue (test event, Telegram test)
 - `web.py` (server) + `webpages.py`/`webstats.py`/`webcharts.py`/`webexport.py`/`webstyle.py` (HTML, SVG charts, CSV/JSON/metrics, CSS) + `settings.py`: separate `sherpa web` process (stdlib, no JS) reading the DB and `status.json`, editing `config/config.yaml`; the service watches the file and restarts itself (exit 75) on a valid change
 
 ## Invariants - do not break
@@ -23,6 +23,9 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - A test event must never shorten a real alert (it re-arms timers to a few seconds): it is refused while a real
   event is younger than on_duration + 30 s or any relay is ON, a real event cancels a running test and re-sends
   its ON, and test rows are never replayed as real activations after a restart.
+- Manual light scenes (colours, effects, 'until I turn it off', `lights.py`) must keep the invariants: every ON frame
+  carries a short device-side timer (renewed by the next frame, never a timer-less ON), frames are never faster than
+  2.5/s, a real dispatch cancels all scenes first and re-arms, and nothing manual starts or stops during a real alert.
 - Only `sherpa run` may ping the dead-man URL (selftest/test-event must not report "alive").
 - An invalid config must never stop SHERPA: it runs the last-good copy (`--fallback`) and alerts until fixed.
 - Per-poll alerts use hysteresis (3 polls); alert queue is bounded and device alerts go first.

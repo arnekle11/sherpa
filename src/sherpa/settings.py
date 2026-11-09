@@ -37,12 +37,14 @@ ALERT_FIELDS = {
 }
 DEVICE_FIELDS = {
     "name": str, "ip": str, "generation": int, "model": str, "channel": int, "component": str,
+    "alert_color": str, "alert_brightness": int,
     "on_duration_s": int, "timeout_s": float, "attempts": int, "retry_delay_s": float,
 }
 DEVICE_DEFAULTS = {"name": "", "ip": "", "generation": 1, "model": "", "channel": 0, "component": "switch",
+                   "alert_color": "", "alert_brightness": 0,
                    "on_duration_s": 300, "timeout_s": 3.0, "attempts": 4, "retry_delay_s": 0.5}
 DEVICE_LABELS = {"name": "name", "ip": "address", "generation": "generation", "model": "model label",
-                 "channel": "relay channel", "component": "output type", "on_duration_s": "on duration", "timeout_s": "timeout",
+                 "channel": "relay channel", "component": "output type", "alert_color": "alert colour", "alert_brightness": "alert brightness", "on_duration_s": "on duration", "timeout_s": "timeout",
                  "attempts": "attempts", "retry_delay_s": "retry delay"}
 
 # field -> (min, max, zero_allowed)
@@ -55,6 +57,7 @@ BOUNDS = {
     "alerts.device_check_interval_s": (30, 3600, True),
     "alerts.deadman_interval_s": (10, 3600, False),
     "dev.channel": (0, 3, False),
+    "dev.alert_brightness": (1, 100, True),
     "dev.on_duration_s": (10, 3600, False),
     "dev.timeout_s": (0.5, 10, False),
     "dev.attempts": (1, 10, False),
@@ -164,7 +167,7 @@ def _build(raw: dict, form: dict[str, str]) -> tuple[dict, list[FieldError], lis
         for key, kind in DEVICE_FIELDS.items():
             field = f"dev.{idx}.{key}"
             flabel = f"{label} {DEVICE_LABELS[key]}"
-            text = r.get(key, "") or (DEVICE_DEFAULTS[key] if key == "component" else "")
+            text = r.get(key, "") or (str(DEVICE_DEFAULTS[key]) if key in ("component", "alert_brightness") else "")
             if kind is str:
                 dev[key] = text.strip()
             elif text.strip() == "":

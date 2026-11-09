@@ -170,7 +170,7 @@ def test_light_command_validation():
     ok = {"kind": "light", "ts": time.time(), "source": "cli", "device": "led-1", "action": "on", "duration_s": 60}
     assert commands.validate(dict(ok))["duration_s"] == 60
     assert commands.validate({**ok, "action": "off", "duration_s": None})["action"] == "off"
-    for bad in ({"duration_s": 4}, {"duration_s": 3601}, {"duration_s": True}, {"duration_s": None},
+    for bad in ({"duration_s": 4}, {"duration_s": 43201}, {"duration_s": True}, {"duration_s": None},
                 {"action": "toggle"}, {"device": "../x"}, {"device": ""}):
         assert commands.validate({**ok, **bad}) is None, bad
 

@@ -7,10 +7,11 @@ import time
 from urllib.parse import urlencode
 from datetime import UTC, datetime, timedelta
 
-from . import BUILD, settings
+from . import BUILD, lights, settings
+from .devices import capability_of
 from .store import LAG_SQL, lag_summary
 from .webcharts import vbars
-from .webstyle import CSS_VERSION, LOGO, icon
+from .webstyle import CSS_VERSION, LOGO, SWATCHES, icon
 
 STALE_STATUS_S = 30
 _e = html.escape
@@ -657,11 +658,13 @@ DEV_LABELS = {
     "name": ("Name", ""), "ip": ("Address", "IP or host, optionally :port"),
     "generation": ("Generation", "from http://IP/shelly: \"gen\": 2, 3 or 4 = Gen2 or newer"),
     "model": ("Model label", "free text"), "channel": ("Relay channel", "usually 0"),
+    "alert_color": ("Alert colour", "RGB outputs: colour of a real alert, like #ff0000; empty = leave the device's own"),
+    "alert_brightness": ("Alert brightness", "colour/dimmer outputs: 1-100 %; 0 = leave the device's own"),
     "component": ("Output type", "Switch for relays; RGB, RGBW or Light if /shelly shows \"profile\": \"rgb\" / \"light\""),
     "on_duration_s": ("On duration", "device-side auto-off timer"), "timeout_s": ("Timeout", "per attempt"),
     "attempts": ("Attempts", "tries including the first"), "retry_delay_s": ("Retry delay", "first back-off step"),
 }
-DEV_UNITS = {"on_duration_s": "s", "timeout_s": "s", "retry_delay_s": "s"}
+DEV_UNITS = {"on_duration_s": "s", "timeout_s": "s", "retry_delay_s": "s", "alert_brightness": "%"}
 
 
 def _field(fid: str, label: str, value, hint: str = "", unit: str = "", err: str | None = None,
@@ -747,11 +750,48 @@ def tools_card(w, sess: dict, msg: tuple[str, str] | None = None) -> str:
 
 
 LIGHT_PRESETS = ((30, "30 s"), (60, "1 min"), (300, "5 min"), (900, "15 min"))
+SCENE_DURATIONS = (("60", "1 minute"), ("300", "5 minutes"), ("900", "15 minutes"), ("3600", "1 hour"),
+                   ("hold", "Until I turn it off"))
+SPEEDS = ((1, "Slow"), (2, "Normal"), (3, "Fast"))
+
+
+def _scene_form(dc, csrf: str) -> str:
+    """Colour and effects for one device; only what its output can do is offered."""
+    cap = capability_of(dc)
+    effects = [("solid", "Solid colour" if cap == "color" else "Plain on")] + [
+        (k, v[0]) for k, v in lights.EFFECTS.items() if lights.supports(cap, k)]
+    opts = "".join(f'<option value="{k}">{_e(n)}</option>' for k, n in effects)
+    color = bright = ""
+    if cap == "color":
+        color = ('<div class="field"><label>Colour (used by solid colour, blink, breathe, strobe, SOS)</label>'
+                 '<input type="color" name="color" value="#ff0000" class="colorin"></div>')
+    if cap != "onoff":
+        bright = ('<div class="field"><label>Brightness</label><input type="range" name="brightness" min="1" max="100" '
+                  'value="100" class="range"></div>')
+    speed = "".join(f'<option value="{v}"{" selected" if v == 2 else ""}>{n}</option>' for v, n in SPEEDS)
+    dur = "".join(f'<option value="{v}">{n}</option>' for v, n in SCENE_DURATIONS)
+    return (f'<form method="post" action="/tools/light" class="scene">{csrf}<input type="hidden" name="device" value="{_e(dc.name)}">'
+            '<input type="hidden" name="action" value="scene">'
+            f'<div class="field"><label>Effect</label><select name="effect">{opts}</select></div>{color}{bright}'
+            f'<div class="field"><label>Speed</label><select name="speed">{speed}</select></div>'
+            f'<div class="field"><label>For how long</label><select name="duration_s">{dur}</select></div>'
+            f'<button class="btn big" type="submit">{icon("bolt")} Start</button></form>')
+
+
+def _swatches(dc, csrf: str) -> str:
+    """One tap = this colour until turned off."""
+    if capability_of(dc) != "color":
+        return ""
+    btns = "".join(f'<button class="sw" type="submit" name="color" value="{c}" aria-label="Colour {c}"></button>'
+                   for c in SWATCHES)
+    return (f'<form method="post" action="/tools/light">{csrf}<input type="hidden" name="device" value="{_e(dc.name)}">'
+            '<input type="hidden" name="action" value="on"><input type="hidden" name="duration_s" value="hold">'
+            f'<div class="lbl">Colour, until I turn it off</div><div class="swatches">{btns}</div></form>')
 
 
 def lights_page(w, sess: dict | None, msg: tuple[str, str] | None = None) -> str:
-    """Manual control of every light, made for a phone: big buttons, one tap. ON always carries the
-    device-side timer; OFF is refused by the service while a real alert may be active."""
+    """Manual control of every light, made for a phone: big buttons, one tap. Every ON carries a device-side
+    timer (renewed for 'until I turn it off'); OFF and anything new is refused while a real alert is active."""
     if sess is None:
         return layout(w, "Lights", page_head("Lights") + '<section class="card"><div class="card-b">'
                       f'<p>{icon("lock")} Log in to control the lights.</p><p><a class="btn" href="/login">Log in</a></p>'
@@ -767,28 +807,39 @@ def lights_page(w, sess: dict | None, msg: tuple[str, str] | None = None) -> str
     if not alive:
         notes += '<div class="notice bad"><div class="txt">The service is not running, so the lights cannot be controlled from here.</div></div>'
     cards = []
-    for d in (cfg.devices if cfg else []):
-        live = (st.get("devices") or {}).get(d.name, {})
+    for dc in (cfg.devices if cfg else []):
+        live = (st.get("devices") or {}).get(dc.name, {})
+        running = (st.get("lights") or {}).get(dc.name)
         reach = badge("ok", "reachable") if live.get("ok") else (badge("bad", "not reachable") if live.get("ok") is False
                                                                  else badge("mute", "not checked yet"))
+        now = ""
+        if running:
+            ends = running.get("ends")
+            until = ("until you turn it off" if not ends else
+                     "until " + datetime.fromtimestamp(ends).astimezone().strftime("%H:%M:%S"))
+            now = f'<div class="notice ok"><div class="txt"><b>Running: {_e(running["label"])}</b> {until}</div></div>'
         on_btns = "".join(f'<button class="btn big" type="submit" name="duration_s" value="{s}">{icon("bolt")} {lbl}</button>'
                           for s, lbl in LIGHT_PRESETS)
+        hold_btn = f'<button class="btn big hold" type="submit" name="duration_s" value="hold">{icon("bolt")} Until I turn it off</button>'
         cards.append(
-            f'<section class="card light"><div class="card-h"><h2>{_e(d.name)}</h2>{reach}</div><div class="card-b">'
-            f'<form method="post" action="/tools/light">{csrf}<input type="hidden" name="device" value="{_e(d.name)}">'
+            f'<section class="card light"><div class="card-h"><h2>{_e(dc.name)}</h2>{reach}</div><div class="card-b">{now}'
+            f'<form method="post" action="/tools/light">{csrf}<input type="hidden" name="device" value="{_e(dc.name)}">'
             f'<input type="hidden" name="action" value="on"><div class="lbl">Turn on for</div>'
-            f'<div class="presets">{on_btns}</div></form>'
-            f'<form method="post" action="/tools/light" class="offf">{csrf}<input type="hidden" name="device" value="{_e(d.name)}">'
+            f'<div class="presets">{on_btns}{hold_btn}</div></form>'
+            f'{_swatches(dc, csrf)}'
+            f'<details class="more"><summary>Colour &amp; effects</summary>{_scene_form(dc, csrf)}</details>'
+            f'<form method="post" action="/tools/light" class="offf">{csrf}<input type="hidden" name="device" value="{_e(dc.name)}">'
             f'<input type="hidden" name="action" value="off"><button class="btn big ghost" type="submit">Turn off</button></form>'
             "</div></section>")
     rows = w.query("SELECT ts, text FROM alert_log WHERE text LIKE '%light control:%' ORDER BY id DESC LIMIT 8")
     recent = "".join(f'<li><div class="mute small">{when(r["ts"])}</div>{_e(_EMOJI.sub("", r["text"]))}</li>'
                      for r in rows) or '<li class="mute">Nothing yet.</li>'
-    note = ("A real emergency overrides these buttons: it switches the lights on for their normal time. "
-            "Manual 'on' always turns itself off.")
+    note = ("A real emergency overrides everything here: effects stop and the light switches on for its normal time. "
+            "Whatever you start keeps a short timer inside the Shelly, so it also goes off by itself if SHERPA stops.")
     return layout(w, "Lights", page_head("Lights", note) + notes + '<div class="lights">' + "".join(cards) + "</div>"
                   '<section class="card"><div class="card-h"><h2>Recent light actions</h2></div><div class="card-b">'
-                  f'<ul class="plain">{recent}</ul></div></section>', "lights", True)
+                  f'<ul class="plain">{recent}</ul></div></section>', "lights", True,
+                  refresh=0)
 
 
 def settings_page(w, sess: dict | None, errors: list[str] | None = None, saved: bool = False,

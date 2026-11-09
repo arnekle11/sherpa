@@ -32,6 +32,9 @@ class DeviceCfg(_Base):
     channel: int = Field(0, ge=0)
     # Gen2 component that drives the output: switch (relays), or light/rgb/rgbw (dimmer and LED-strip profiles)
     component: Literal["switch", "light", "rgb", "rgbw"] = "switch"
+    # What a real alert looks like on colour/dimmer outputs. Empty/0 = leave the device's own colour/brightness.
+    alert_color: str = Field("", pattern=r"^(#[0-9a-fA-F]{6})?$")
+    alert_brightness: int = Field(0, ge=0, le=100)
     on_duration_s: int = Field(300, ge=1)
     timeout_s: float = Field(3.0, gt=0)
     attempts: int = Field(4, ge=1)

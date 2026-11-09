@@ -347,7 +347,7 @@ def cmd_mock_feed(args) -> int:
 
 def cmd_mock_shelly(args) -> int:
     from .mock import MockShelly
-    s = MockShelly(args.gen, host=args.host, port=args.port).start()
+    s = MockShelly(args.gen, component=args.component, host=args.host, port=args.port).start()
     print(f"mock Gen{args.gen} Shelly on http://{args.host}:{s.port}  (use ip: {args.host}:{s.port})")
     try:
         while True:
@@ -392,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--host", default="127.0.0.1"); sp.add_argument("--port", type=int, default=8099)
     sp = add("mock-shelly", cmd_mock_shelly, "serve a mock Shelly", config=False)
     sp.add_argument("--gen", type=int, choices=(1, 2), default=1)
+    sp.add_argument("--component", choices=("switch", "light", "rgb", "rgbw"), default="switch")
     sp.add_argument("--host", default="127.0.0.1"); sp.add_argument("--port", type=int, default=8098)
 
     args = p.parse_args(argv)

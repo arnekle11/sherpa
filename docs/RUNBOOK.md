@@ -92,10 +92,22 @@ Saving restarts the service by itself within ~5 s and the restart message lists 
 4. Run a test event (section 6). Shelly authentication must be **off** (not supported yet).
 
 ### 5.2a Controlling the lights by hand (phone)
-Web UI → **Lights** (log in; works on a phone). Per device: **Turn on for** 30 s / 1 min / 5 min / 15 min, and
-**Turn off**. The device keeps the timer, so a manual ON turns itself off even if SHERPA dies. A real emergency
-always overrides: it switches the light on for its normal time, and Off is refused while a real alert may be
-active (its own timer ends it). Every action is logged under Alerts ("light control: ...") and sent to Telegram.
+Web UI → **Lights** (log in; works on a phone). Per device:
+- **Turn on for** 30 s / 1 min / 5 min / 15 min, or **Until I turn it off**, and **Turn off**.
+- On a colour output (RGB/RGBW): one-tap **colours** (until turned off), a colour picker and brightness.
+- **Colour & effects**: Rainbow, Disco, Police, Fire, Ocean, Christmas, Traffic light, Breathe, Blink, Strobe
+  (fast blink), SOS. Speed slow/normal/fast; for 1 min up to 1 h or until you turn it off. A dimmer can do
+  Breathe/Blink/Strobe/SOS, a relay only Blink/Strobe/SOS.
+
+How it stays safe: every ON step carries a short timer **inside the Shelly** (10 s for effects, 60 s for "until I
+turn it off", renewed every 15 s), so if SHERPA or the VM stops, the light goes off by itself within seconds.
+Effects never flash faster than 2.5 times a second. A real emergency always wins: all effects stop at once and
+the light switches on for its normal time in the **alert colour**; while a real alert may be active nothing manual
+can be started and Off is refused (its own timer ends it). A restart of the service (e.g. after saving Settings)
+also ends running effects. Every action is logged under Alerts ("light control: ...") and sent to Telegram.
+
+**Alert colour:** Settings → the device → *Alert colour* (e.g. `#ff0000`) and *Alert brightness*. Without them,
+the colour and brightness the device had before the first manual colour are restored for the alert.
 
 ### 5.3 A Shelly got a new IP address
 Fix the address under Settings → the device, save, then run a test event. Prevent it with a DHCP reservation.

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from . import BUILD, commands
+from . import BUILD, commands, lights
 from .alerts import AlertManager, LogNotifier, Notifier, TelegramNotifier
 from .config import AppCfg, describe_changes, load_config, telegram_from_env
 from .deadman import Deadman
@@ -90,6 +90,7 @@ class App:
         self.command_poll_s = 2.0
         self._real_dispatches = 0  # bumped whenever a real activation starts
         self._last_real_dispatch = float("-inf")
+        self.scenes = lights.Scenes(self.alerts.info)
         self._test_task: asyncio.Task | None = None
         # Only `sherpa run` passes the URL: selftest/test-event must never tell the monitor we are alive.
         self.deadman = Deadman(deadman, cfg.alerts.deadman_interval_s, self._poll_healthy) if deadman else None
@@ -317,6 +318,8 @@ class App:
     async def _dispatch(self, guids: list[str], reason: str) -> None:
         self._real_dispatches += 1
         self._last_real_dispatch = time.monotonic()
+        if self.scenes.cancel_all():  # manual colours/effects stop at once; an in-flight frame is out-voted below
+            self._spawn(self._rearm_after_test(), "rearm")
         test = self._test_task
         if test and not test.done():  # a real alert always wins over a test: stop the test's retries
             log.warning("real event during a test event: cancelling the test")
@@ -495,6 +498,7 @@ class App:
                 "telegram_delivery": self.alerts.delivery_snapshot(),
                 "feed_items_at": self.last_items_at,
                 "deadman": self.deadman.snapshot() if self.deadman else {"configured": False},
+                "lights": self.scenes.active(),
                 "latency": self.pollstats.latency_summary(),
                 "feed_items": self.last_items,
                 "devices": {d.name: self.device_status.get(d.name, {"ip": d.cfg.ip, "ok": None,
@@ -588,30 +592,48 @@ class App:
             log.warning("TEST EVENT requested from %s (%d s)", who, d)
             self._test_task = self._spawn(self._safe_test_event(d, who), "test-event")
 
+    def _real_alert_may_be_active(self) -> bool:
+        window = max(d.on_duration_s for d in self.cfg.devices) + 30
+        last_real = self.store.last_event_time(test=False)
+        return bool((last_real and (datetime.now(UTC) - last_real).total_seconds() < window)
+                    or time.monotonic() - self._last_real_dispatch < window)
+
     async def _safe_light(self, cmd: dict, who: str) -> None:
         name, action = cmd["device"], cmd["action"]
         dev = next((d for d in self.devices if d.name == name), None)
         try:
             if dev is None:
                 return self.alerts.info(f"light control: unknown device '{name}' (requested from {who})")
+            if self._real_alert_may_be_active():
+                # An alert's own timer runs the light. Anything manual would change its colour or shorten its timer.
+                return self.alerts.info(f"light control: {action.upper()} for {name} from {who} refused: a real alert may "
+                                        "still be active. Its timer turns the light off by itself.")
             if action == "off":
-                window = max(d.on_duration_s for d in self.cfg.devices) + 30
-                last_real = self.store.last_event_time(test=False)
-                if (last_real and (datetime.now(UTC) - last_real).total_seconds() < window) \
-                        or time.monotonic() - self._last_real_dispatch < window:
-                    return self.alerts.info(f"light control: OFF for {name} from {who} refused: a real alert may "
-                                            "still be active. Its timer turns the light off by itself.")
+                await self.scenes.stop(dev)
                 r = await dev.deactivate()
                 log.warning("light %s OFF from %s: %s", name, who, "ok" if r.ok else r.detail)
                 return self.alerts.info(f"light control: {name} switched OFF by {who}" if r.ok else
                                         f"light control: {name} OFF FAILED ({r.detail})")
-            seq = self._real_dispatches
-            r = await dev.activate(cmd["duration_s"])
-            if self._real_dispatches != seq:  # a real event overlapped: its timer must have the last word
-                self._spawn(self._rearm_after_test(), "rearm")
-            log.warning("light %s ON %d s from %s: %s", name, cmd["duration_s"], who, "ok" if r.ok else r.detail)
-            self.alerts.info(f"light control: {name} switched ON for {cmd['duration_s']} s by {who}" if r.ok else
-                             f"light control: {name} ON FAILED ({r.detail})")
+            hold, secs = cmd.get("hold", False), cmd.get("duration_s")
+            until = "until turned off" if hold else f"for {secs} s"
+            effect = cmd.get("effect", "solid")
+            if not lights.supports(dev.capability, effect):
+                return self.alerts.info(f"light control: {name} cannot do '{effect}' (its output is {dev.capability})")
+            color = lights._rgb_hex(cmd["color"]) if cmd.get("color") else None
+            if action == "on" and not hold and color is None and "brightness" not in cmd:
+                await self.scenes.stop(dev)  # plain timed ON: the device's own look and its own timer
+                seq = self._real_dispatches
+                r = await dev.activate(secs)
+                if self._real_dispatches != seq:  # a real event overlapped: its timer must have the last word
+                    self._spawn(self._rearm_after_test(), "rearm")
+                log.warning("light %s ON %s from %s: %s", name, until, who, "ok" if r.ok else r.detail)
+                return self.alerts.info(f"light control: {name} switched ON {until} by {who}" if r.ok else
+                                        f"light control: {name} ON FAILED ({r.detail})")
+            self.scenes.start(dev, effect, color or (None if effect == "solid" else (255, 255, 255)),
+                              cmd.get("brightness"), cmd.get("speed", 2), None if hold else secs)
+            label = "solid colour" if effect == "solid" else lights.EFFECTS[effect][0]
+            log.warning("light %s %s %s from %s", name, label, until, who)
+            self.alerts.info(f"light control: {name} runs {label} {until}, started by {who}")
         except Exception as e:
             log.exception("light control failed")
             self.alerts.info(f"light control: {name} failed internally: {e!r}")
@@ -633,6 +655,8 @@ class App:
     async def test_event_blocker(self) -> str | None:
         """Why a test event must not run now, or None. A test re-arms every timer to a few seconds, which
         would cut short a real alert that is still lighting the LED."""
+        if self.scenes.active():
+            return "a manual light scene is running; turn it off first"
         now = datetime.now(UTC)
         last_test = self.store.last_event_time(test=True)
         if last_test and (now - last_test).total_seconds() < commands.TEST_EVENT_COOLDOWN_S:
