@@ -415,7 +415,7 @@ def make_handler(w: Web):
                         params.update(effect=effect, speed=int(form.get("speed", "2")))
                 except ValueError:
                     return "/lights?err=light"
-            if w.test_event_blocker() == "real_event":  # same window as the service's check, for an instant answer
+            if action != "off" and w.test_event_blocker() == "real_event":  # same window as the service's check, for an instant answer
                 return "/lights?err=light_busy"
             if commands.validate({"kind": "light", "ts": time.time(), "source": "cli", **params}) is None:
                 return "/lights?err=light"

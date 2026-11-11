@@ -15,6 +15,7 @@ devices:
     model: "Shelly 1"       # free-text label only
     channel: 0
     component: switch       # Gen2 only: switch | rgb | rgbw | light (use rgb/rgbw/light if /shelly shows such a "profile")
+    alert_effect: blink     # rgb/rgbw/light: a real alert blinks (red unless alert_color) until turned off on the Lights page; solid = plain timer
     on_duration_s: 300      # device-side auto-off timer, survives app death
     timeout_s: 3
     attempts: 4             # total tries incl. the first

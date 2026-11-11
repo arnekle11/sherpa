@@ -16,6 +16,7 @@ sudo timedatectl set-ntp true                              # the startup age fil
 Colour, effects and phone control of the lights: web UI → Lights (see docs/RUNBOOK.md 5.2a).
 
 Output type: if `/shelly` shows `"profile": "rgb"` (e.g. Plus RGBW PM) set `component: rgb` on the device.
+On such outputs a real alert blinks red until you press Turn off on the Lights page (`alert_effect: blink`, the default; `solid` = plain 300 s light). The blink renews the full device timer and never goes dark, so a dead SHERPA leaves it lit until that timer ends.
 
 Shelly generation: open `http://SHELLY_IP/shelly`. A `"gen": 2`, `3` or `4` field means `generation: 2`
 (same RPC API); no `gen` field means Gen1. Shelly authentication must be off.

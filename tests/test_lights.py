@@ -122,7 +122,7 @@ def test_real_alert_cancels_scene_and_lights_with_alert_look(monkeypatch, tmp_pa
 
     async def go():
         feed, sh = MockFeed().start(), MockShelly(2, component="rgb").start()
-        app, cfg = _app(tmp_path, feed, sh, alert_color="#ff0000", alert_brightness=100)
+        app, cfg = _app(tmp_path, feed, sh, alert_color="#ff0000", alert_brightness=100, alert_effect="solid")
         t = asyncio.create_task(app.run())
         await asyncio.sleep(0.3)
         d = commands.command_dir(cfg.db_path)
@@ -159,7 +159,7 @@ def test_stop_without_alert_look_puts_original_colour_back_and_alert_uses_it(mon
 
     async def go():
         feed, sh = MockFeed().start(), MockShelly(2, component="rgb").start()
-        app, cfg = _app(tmp_path, feed, sh)
+        app, cfg = _app(tmp_path, feed, sh, alert_effect="solid")
         t = asyncio.create_task(app.run())
         await asyncio.sleep(0.3)
         d = commands.command_dir(cfg.db_path)
@@ -243,3 +243,41 @@ def test_status_json_reports_running_scenes(tmp_path):
 
     st = asyncio.run(go())
     assert st["lights"]["d"]["label"] == "Fire" and st["lights"]["d"]["hold"] is True
+
+
+def test_real_alert_blinks_red_until_turned_off_and_never_goes_dark(monkeypatch, tmp_path):
+    monkeypatch.setattr(lights, "ALERT_STEP_S", 0.4)
+    monkeypatch.setattr(lights, "MIN_STEP_S", 0.05)
+
+    async def go():
+        feed, sh = MockFeed().start(), MockShelly(2, component="rgb").start()
+        app, cfg = _app(tmp_path, feed, sh)
+        t = asyncio.create_task(app.run())
+        await asyncio.sleep(0.3)
+        feed.add_item("Požar")
+        await asyncio.sleep(3.0)
+        running = app.scenes.active().get("d")
+        frames = [f for f in sh.frames if "id" in f]
+        # manual commands other than OFF stay refused, a test event too
+        d = commands.command_dir(cfg.db_path)
+        commands.submit(d, "light", "10.0.0.3", device="d", action="effect", effect="police", hold=True)
+        await asyncio.sleep(0.6)
+        still = app.scenes.active().get("d", {}).get("label")
+        commands.submit(d, "light", "10.0.0.3", device="d", action="off")
+        await asyncio.sleep(1.0)
+        res = (sh.is_on, sh.rgb, sh.brightness, app.scenes.active())
+        n = len(sh.frames)
+        await asyncio.sleep(0.8)
+        quiet = n == len(sh.frames)
+        app.stop(); await asyncio.wait_for(t, 15)
+        feed.stop(); sh.stop()
+        return running, frames, still, res, quiet
+
+    running, frames, still, res, quiet = asyncio.run(go())
+    assert running and running["alert"] and running["hold"] and running["ends"] is None
+    ons = [f for f in frames if f.get("on")]
+    assert len(ons) >= 4 and all(f["on"] and f["rgb"] == [255, 0, 0] and f["toggle_after"] == 300 for f in ons), \
+        "red, full alert timer on every frame, never an OFF frame while blinking"
+    assert {f["brightness"] for f in ons} == {100, lights.ALERT_DIM}
+    assert still == "Alert (blinking)"
+    assert res == (False, [255, 0, 0], 8, {}) and quiet  # off, the device's own look is back, no more frames

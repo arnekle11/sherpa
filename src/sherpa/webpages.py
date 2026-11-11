@@ -660,6 +660,7 @@ DEV_LABELS = {
     "model": ("Model label", "free text"), "channel": ("Relay channel", "usually 0"),
     "alert_color": ("Alert colour", "RGB outputs: colour of a real alert, like #ff0000; empty = leave the device's own"),
     "alert_brightness": ("Alert brightness", "colour/dimmer outputs: 1-100 %; 0 = leave the device's own"),
+    "alert_effect": ("Alert look", "colour/dimmer outputs: blink until turned off on the Lights page, or stay solid"),
     "component": ("Output type", "Switch for relays; RGB, RGBW or Light if /shelly shows \"profile\": \"rgb\" / \"light\""),
     "on_duration_s": ("On duration", "device-side auto-off timer"), "timeout_s": ("Timeout", "per attempt"),
     "attempts": ("Attempts", "tries including the first"), "retry_delay_s": ("Retry delay", "first back-off step"),
@@ -689,6 +690,11 @@ def _device_card(i: int, d: dict, is_new: bool, live: dict | None, ferr: dict[st
                            for g, n in ((1, "Gen1"), (2, "Gen2 or newer")))
             fields.append(f'<div class="field"><label for="dev.{i}.generation">{label}</label>'
                           f'<select id="dev.{i}.generation" name="dev.{i}.generation">{opts}</select><div class="hint">{hint}</div></div>')
+        elif k == "alert_effect":
+            opts = "".join(f'<option value="{c}"{" selected" if str(d[k]) == c else ""}>{n}</option>'
+                           for c, n in (("blink", "Blink (until turned off)"), ("solid", "Solid (timer only)")))
+            fields.append(f'<div class="field"><label for="dev.{i}.alert_effect">{label}</label>'
+                          f'<select id="dev.{i}.alert_effect" name="dev.{i}.alert_effect">{opts}</select><div class="hint">{hint}</div></div>')
         elif k == "component":
             opts = "".join(f'<option value="{c}"{" selected" if str(d[k]) == c else ""}>{n}</option>'
                            for c, n in (("switch", "Switch (relay)"), ("rgb", "RGB"), ("rgbw", "RGBW"), ("light", "Light (dimmer)")))

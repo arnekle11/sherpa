@@ -332,10 +332,24 @@ class App:
             self.alerts.raise_("dispatch", f"dispatch crashed: {e!r}")
             return
         self.alerts.clear("dispatch", "dispatching works again")
+        self._start_alert_blink(results)
         ok = sum(r.ok for r in results)
         state = "triggered" if ok == len(results) else ("partial" if ok else "failed")
         detail = "; ".join(f"{r.name}={'ok' if r.ok else r.detail}" for r in results)
         self._set_states(guids, state, detail)
+
+    def _start_alert_blink(self, results) -> None:
+        """Colour/dimmer outputs that were lit: blink (red by default) until a person turns the light off."""
+        try:
+            for r in results:
+                dev = next((d for d in self.devices if d.name == r.name), None)
+                if not r.ok or dev is None or dev.cfg.alert_effect != "blink" or dev.capability == "onoff":
+                    continue
+                color = lights._rgb_hex(dev.cfg.alert_color) if dev.cfg.alert_color else (255, 0, 0)
+                self.scenes.start_alert(dev, color if dev.capability == "color" else None,
+                                        dev.cfg.alert_brightness or 100, dev.cfg.on_duration_s)
+        except Exception:
+            log.exception("could not start the alert blink; the plain alert keeps running")
 
     def _set_states(self, guids: list[str], state: str, detail: str) -> None:
         try:
@@ -604,7 +618,7 @@ class App:
         try:
             if dev is None:
                 return self.alerts.info(f"light control: unknown device '{name}' (requested from {who})")
-            if self._real_alert_may_be_active():
+            if self._real_alert_may_be_active() and not (action == "off" and self.scenes.is_alert(name)):
                 # An alert's own timer runs the light. Anything manual would change its colour or shorten its timer.
                 return self.alerts.info(f"light control: {action.upper()} for {name} from {who} refused: a real alert may "
                                         "still be active. Its timer turns the light off by itself.")
@@ -656,7 +670,8 @@ class App:
         """Why a test event must not run now, or None. A test re-arms every timer to a few seconds, which
         would cut short a real alert that is still lighting the LED."""
         if self.scenes.active():
-            return "a manual light scene is running; turn it off first"
+            return ("an alert is blinking; turn it off on the Lights page first" if any(s.get("alert") for s in self.scenes.active().values())
+                    else "a manual light scene is running; turn it off first")
         now = datetime.now(UTC)
         last_test = self.store.last_event_time(test=True)
         if last_test and (now - last_test).total_seconds() < commands.TEST_EVENT_COOLDOWN_S:

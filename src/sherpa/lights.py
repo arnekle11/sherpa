@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import colorsys
+import itertools
 import logging
 import math
 import random
@@ -26,6 +27,8 @@ HOLD_RENEW_S = 15
 MAX_FAILS = 5             # consecutive failed frames before a scene gives up (and says so)
 SPEED_FACTOR = {1: 1.6, 2: 1.0, 3: 0.6}   # step multiplier for speed 1 (slow) .. 3 (fast)
 CAP_RANK = {"onoff": 0, "bright": 1, "color": 2}
+ALERT_STEP_S = 0.8        # a real alert blinks at 0.8 s per phase (0.625 Hz), well below the photosensitivity range
+ALERT_DIM = 8             # the "off" phase of an alert blink is this dim %, never dark (see Scenes.start_alert)
 
 
 @dataclass(frozen=True)
@@ -159,6 +162,7 @@ class Scene:
     hold: bool
     since: float
     ends: float | None   # epoch seconds, None = until turned off
+    alert: bool = False  # the blink of a real alert (started by the service, not by a person)
     task: asyncio.Task | None = None
 
 
@@ -170,7 +174,7 @@ class Scenes:
         self._scenes: dict[str, Scene] = {}
 
     def active(self) -> dict[str, dict]:
-        return {n: {"effect": s.effect, "label": s.label, "hold": s.hold, "since": s.since, "ends": s.ends}
+        return {n: {"effect": s.effect, "label": s.label, "hold": s.hold, "since": s.since, "ends": s.ends, "alert": s.alert}
                 for n, s in self._scenes.items()}
 
     def start(self, dev: ShellyDevice, effect: str, color: tuple[int, int, int], brightness: int | None,
@@ -184,6 +188,45 @@ class Scenes:
         self._scenes[dev.name] = sc
         sc.task = asyncio.get_running_loop().create_task(
             self._run(dev, sc, color, brightness, speed, duration_s), name=f"scene-{dev.name}")
+
+    def start_alert(self, dev: ShellyDevice, color: tuple[int, int, int], brightness: int, timer_s: int) -> None:
+        """A real alert on a colour/dimmer output: blink until a person turns it off.
+
+        Unlike a manual scene the frames carry the alert's own full timer (renewed by every frame), and the "off"
+        phase is a dim light, never dark: if SHERPA dies mid-blink the light is still lit and goes off by itself
+        when the device timer ends, exactly like a plain alert."""
+        old = self._scenes.pop(dev.name, None)
+        if old and old.task:
+            old.task.cancel()
+        now = time.time()
+        sc = Scene(dev.name, "alert", "Alert (blinking)", True, now, None, alert=True)
+        self._scenes[dev.name] = sc
+        sc.task = asyncio.get_running_loop().create_task(
+            self._run_alert(dev, sc, color, brightness, timer_s), name=f"alert-{dev.name}")
+
+    async def _run_alert(self, dev: ShellyDevice, sc: Scene, color, brightness: int, timer_s: int) -> None:
+        fails = 0
+        try:
+            await dev.remember_look()
+            step = max(ALERT_STEP_S, MIN_STEP_S)
+            for level in itertools.cycle((brightness, min(ALERT_DIM, brightness))):
+                ok = await dev.set_frame(True, color, level, timer_s)
+                if not ok and fails == 0:
+                    self._say(f"light control: the alert blink on {dev.name} lost the device; the alert's own "
+                              "timer still runs it")
+                fails = 0 if ok else fails + 1
+                await asyncio.sleep(step)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("alert blink crashed")
+            self._say(f"light control: the alert blink on {dev.name} crashed: {e!r}; the alert's own timer runs the light")
+            if self._scenes.get(dev.name) is sc:
+                del self._scenes[dev.name]
+
+    def is_alert(self, name: str) -> bool:
+        sc = self._scenes.get(name)
+        return bool(sc and sc.alert)
 
     async def stop(self, dev: ShellyDevice) -> bool:
         """Stop the scene (if any) and put the device's own look back; True if one was running."""

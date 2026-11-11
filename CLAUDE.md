@@ -26,6 +26,9 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - Manual light scenes (colours, effects, 'until I turn it off', `lights.py`) must keep the invariants: every ON frame
   carries a short device-side timer (renewed by the next frame, never a timer-less ON), frames are never faster than
   2.5/s, a real dispatch cancels all scenes first and re-arms, and nothing manual starts or stops during a real alert.
+- A real alert on a colour/dimmer output blinks (`alert_effect: blink`, red by default) until a person turns it off
+  (`Scenes.start_alert`): every frame carries the alert's full device timer and the dim phase is never dark, so a dead
+  SHERPA leaves the light lit until that timer ends. Only OFF is accepted while it runs; relays stay solid.
 - Only `sherpa run` may ping the dead-man URL (selftest/test-event must not report "alive").
 - An invalid config must never stop SHERPA: it runs the last-good copy (`--fallback`) and alerts until fixed.
 - Per-poll alerts use hysteresis (3 polls); alert queue is bounded and device alerts go first.

@@ -182,7 +182,7 @@ def test_manual_light_on_has_timer_off_works_and_real_alert_blocks_off(tmp_path,
     async def go():
         feed, sh = MockFeed().start(), MockShelly(gen, component=component).start()
         cfg = AppCfg(feed=FeedCfg(url=feed.url, poll_interval_s=0.5, timeout_s=1),
-                     devices=[DeviceCfg(name="d", ip=sh.hostport, generation=gen, component=component)],
+                     devices=[DeviceCfg(name="d", ip=sh.hostport, generation=gen, component=component, alert_effect="solid")],
                      alerts=AlertsCfg(device_check_interval_s=0), db_path=str(tmp_path / "x.db"))
         app = App(cfg, telegram=None, deadman=None)
         app.command_poll_s = 0.1
