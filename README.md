@@ -72,3 +72,11 @@ Manual fake setup (three terminals): `sherpa mock-feed`, `sherpa mock-shelly --g
 `http://127.0.0.1:8099/feed` and `127.0.0.1:8098` with `db_path: data/sherpa.db`; inject an event with
 `curl -X POST 'http://127.0.0.1:8099/inject?title=Test'`. Dependencies for the image are pinned in
 `requirements.lock`; change them deliberately and rebuild (the build runs the self-test).
+
+## Phone notifications (Pushover)
+Extra feeds can notify a phone through [Pushover](https://pushover.net) without touching any light. Put
+`SHERPA_PUSHOVER_TOKEN` (an application API token) and `SHERPA_PUSHOVER_USER` (your user key) in `.env`, add the feed
+to `config.yaml` (see `push_feeds` in `config.example.yaml`) and run `docker compose up -d`. Each new item sends one
+notification (title, place and time, link to the map). Old items are not sent when the service starts, an undelivered one
+is retried, and a feed or Pushover problem raises a normal SHERPA alert. The feeds are not editable in the web UI yet,
+but saving settings there keeps them.

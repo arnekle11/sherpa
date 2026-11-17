@@ -5,10 +5,13 @@ event loop. synchronous=FULL so a power cut cannot lose a recorded guid.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import statistics
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+log = logging.getLogger("sherpa.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -23,6 +26,14 @@ CREATE TABLE IF NOT EXISTS events (
   is_test    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS events_first_seen ON events(first_seen);
+CREATE TABLE IF NOT EXISTS push_items (
+  feed       TEXT NOT NULL,
+  guid       TEXT NOT NULL,
+  title      TEXT,
+  first_seen TEXT NOT NULL, -- ISO UTC
+  state      TEXT NOT NULL, -- notified|ignored_old|dropped_old
+  PRIMARY KEY (feed, guid)
+);
 CREATE TABLE IF NOT EXISTS alert_log (
   id   INTEGER PRIMARY KEY AUTOINCREMENT,
   ts   TEXT NOT NULL,       -- ISO UTC
@@ -68,6 +79,20 @@ class Store:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
         self._seen: set[str] = {r["guid"] for r in self.db.execute("SELECT guid FROM events")}
+        self._push_seen: set[tuple[str, str]] = {(r["feed"], r["guid"]) for r in
+                                                 self.db.execute("SELECT feed, guid FROM push_items")}
+
+    def push_seen(self, feed: str, guid: str) -> bool:
+        return (feed, guid) in self._push_seen
+
+    def push_record(self, feed: str, it, now: datetime, state: str) -> None:
+        """Remember a push-feed item. Remembered in memory even if the database cannot be written."""
+        self._push_seen.add((feed, it.guid))
+        try:
+            self.db.execute("INSERT OR IGNORE INTO push_items VALUES (?,?,?,?,?)",
+                            (feed, it.guid, it.title, _iso(now), state))
+        except Exception:
+            log.exception("cannot record push item")
 
     def seen(self, guid: str) -> bool:
         return guid in self._seen
@@ -105,6 +130,7 @@ class Store:
         cutoff = _iso(datetime.now(UTC) - timedelta(days=days))
         self.db.execute("DELETE FROM events WHERE first_seen < ?", (cutoff,))
         self.db.execute("DELETE FROM alert_log WHERE ts < ?", (cutoff,))
+        self.db.execute("DELETE FROM push_items WHERE first_seen < ?", (cutoff,))
         self.db.execute("DELETE FROM poll_log WHERE minute < ?", (cutoff[:16],))
 
     def add_poll_minutes(self, rows: dict[str, dict]) -> None:

@@ -268,3 +268,30 @@ class MockTelegram(_Server):
     @property
     def api_base(self) -> str:
         return f"http://{self.hostport}"
+
+
+# ------------------------------------------------------------------ pushover
+class _PoHandler(_Quiet):
+    def do_POST(self):
+        from urllib.parse import parse_qs
+        p: MockPushover = self.server.owner  # type: ignore[attr-defined]
+        n = int(self.headers.get("Content-Length", 0))
+        form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode()).items()}
+        with p.lock:
+            if p.fail:
+                return self._send(400, b'{"status":0,"errors":["user identifier is invalid"]}')
+            p.messages.append(form)
+        self._send(200, b'{"status":1,"request":"x"}')
+
+
+class MockPushover(_Server):
+    handler_cls = _PoHandler
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.messages: list[dict] = []
+        self.fail = False
+
+    @property
+    def api_url(self) -> str:
+        return f"http://{self.hostport}/1/messages.json"

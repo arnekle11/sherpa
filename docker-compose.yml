@@ -15,6 +15,8 @@ services:
       TZ: ${TZ:-Europe/Ljubljana}
       SHERPA_TELEGRAM_TOKEN: ${SHERPA_TELEGRAM_TOKEN:-}
       SHERPA_TELEGRAM_CHAT_ID: ${SHERPA_TELEGRAM_CHAT_ID:-}
+      SHERPA_PUSHOVER_TOKEN: ${SHERPA_PUSHOVER_TOKEN:-}
+      SHERPA_PUSHOVER_USER: ${SHERPA_PUSHOVER_USER:-}
       SHERPA_DEADMAN_URL: ${SHERPA_DEADMAN_URL:-}
     volumes:
       - type: bind                # the directory, not the file: the web UI replaces config.yaml atomically

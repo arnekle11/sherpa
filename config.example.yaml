@@ -8,6 +8,14 @@ feed:
   expected_link_contains: "OD/52034"   # canary: alert if channel self-link stops containing this
   user_agent: "SHERPA (private first-responder notifier)"
 
+# Extra feeds that only send a Pushover notification to the phone (no light). Secrets in .env.
+push_feeds: []
+#  - name: Idrija
+#    url: https://spin3.sos112.si/javno/ODApi/4279
+#    poll_interval_s: 5
+#    priority: 1            # 1 = high (rings through quiet hours), 0 = normal, -1 = quiet
+#    expected_link_contains: "OD/4279"
+
 devices:
   - name: led-bar-1
     ip: 192.168.1.50        # host or host:port

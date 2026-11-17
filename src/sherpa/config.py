@@ -51,8 +51,23 @@ class AlertsCfg(_Base):
     telegram_api_base: str = "https://api.telegram.org"
 
 
+class PushFeedCfg(_Base):
+    """A second feed that only sends Pushover notifications (secrets: SHERPA_PUSHOVER_TOKEN/_USER in .env)."""
+    name: str = Field(pattern=r"^[A-Za-z0-9 ._\-]{1,40}$")
+    url: str
+    enabled: bool = True
+    poll_interval_s: float = Field(5.0, ge=2.0)   # same floor as the main feed
+    timeout_s: float = Field(5.0, gt=0)
+    max_age_min: float = Field(10.0, ge=0)        # at startup, items older than this are not sent
+    priority: int = Field(1, ge=-1, le=1)         # 1 = high priority (ignores quiet hours); 2 is not offered
+    sound: str = Field("", pattern=r"^[a-z_]*$")  # Pushover sound name, empty = the app's default
+    expected_link_contains: str | None = None
+    user_agent: str = "SHERPA (private first-responder notifier)"
+
+
 class AppCfg(_Base):
     feed: FeedCfg
+    push_feeds: list[PushFeedCfg] = []
     devices: list[DeviceCfg] = Field(min_length=1)
     alerts: AlertsCfg = AlertsCfg()
     db_path: str = "data/sherpa.db"
@@ -70,6 +85,9 @@ class AppCfg(_Base):
         names = [d.name for d in self.devices]
         if len(set(names)) != len(names):
             raise ValueError("device names must be unique")
+        pn = [p.name for p in self.push_feeds]
+        if len(set(pn)) != len(pn):
+            raise ValueError("push feed names must be unique")
         return self
 
 

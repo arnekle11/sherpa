@@ -18,6 +18,7 @@ from .deadman import Deadman
 from .devices import make_device, make_device_client
 from .dispatcher import Dispatcher
 from .pollstats import PollStats
+from .pushfeeds import PushFeed, PushoverNotifier, pushover_from_env
 from .feed import FeedFetcher, FeedFormatError, FeedItem, FetchError, parse_feed
 from .store import Store
 
@@ -52,7 +53,7 @@ def build_notifier(cfg: AppCfg, telegram=_ENV) -> Notifier:
 
 class App:
     def __init__(self, cfg: AppCfg, telegram=_ENV, config_path: str | None = None, deadman: str | None = None,
-                 config_error: str | None = None):
+                 config_error: str | None = None, pushover=_ENV):
         self.cfg = cfg
         self.config_error = config_error  # set: config.yaml was invalid at start, cfg is the last-good copy
         self.config_path = config_path  # set => watched; a valid change restarts the service to apply it
@@ -61,6 +62,9 @@ class App:
         self.notifier = build_notifier(cfg, telegram)
         self.alerts = AlertManager(self.notifier, cfg.alerts.repeat_min * 60, on_event=self.store.log_alert)
         self.fetcher = FeedFetcher(cfg.feed)
+        pcreds = pushover_from_env() if pushover is _ENV else pushover
+        self.pushover = PushoverNotifier(*pcreds) if isinstance(pcreds, tuple) else pcreds
+        self.push_feeds = [PushFeed(p, self.store, self.alerts, self.pushover) for p in cfg.push_feeds if p.enabled]
         self._dev_client = make_device_client()
         self.devices = [make_device(d, self._dev_client) for d in cfg.devices]
         self.dispatcher = Dispatcher(self.devices, self.alerts)
@@ -109,7 +113,8 @@ class App:
         await self._recover_pending()
         self.alerts.info(
             f"started v{BUILD}; polling {self.cfg.feed.url} every {self.cfg.feed.poll_interval_s}s; "
-            f"devices: {', '.join(f'{d.name}@{d.ip}' for d in self.cfg.devices)}")
+            f"devices: {', '.join(f'{d.name}@{d.ip}' for d in self.cfg.devices)}"
+            + (f"; push feeds: {', '.join(p.cfg.name for p in self.push_feeds)}" if self.push_feeds else ""))
         loops = [asyncio.create_task(self._poll_loop(), name="poll"),
                  asyncio.create_task(self._status_loop(), name="status"),
                  asyncio.create_task(self._housekeeping_loop(), name="housekeeping"),
@@ -119,6 +124,8 @@ class App:
                  asyncio.create_task(self._config_watch_loop(), name="config-watch"),
                  asyncio.create_task(self._stats_loop(), name="poll-stats"),
                  asyncio.create_task(self._command_loop(), name="commands")]
+        for pf in self.push_feeds:
+            loops.append(asyncio.create_task(pf.run(), name=f"push-{pf.cfg.name}"))
         if self.deadman:
             loops.append(asyncio.create_task(self.deadman.run(), name="deadman"))
         try:
@@ -135,6 +142,10 @@ class App:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
             await self.fetcher.aclose()
+            for pf in self.push_feeds:
+                await pf.fetcher.aclose()
+            if self.pushover:
+                await self.pushover.aclose()
             await self._dev_client.aclose()
             if self.deadman:
                 await self.deadman.aclose()
@@ -513,6 +524,7 @@ class App:
                 "feed_items_at": self.last_items_at,
                 "deadman": self.deadman.snapshot() if self.deadman else {"configured": False},
                 "lights": self.scenes.active(),
+                "push_feeds": {pf.cfg.name: pf.snapshot() for pf in self.push_feeds},
                 "latency": self.pollstats.latency_summary(),
                 "feed_items": self.last_items,
                 "devices": {d.name: self.device_status.get(d.name, {"ip": d.cfg.ip, "ok": None,

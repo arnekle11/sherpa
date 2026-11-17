@@ -10,7 +10,7 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - `feed.py` fetch (keep-alive, hard timeout, size cap) + strict parse; `store.py` SQLite
 - `devices.py` Gen1/Gen2 adapters (ON + timer + read-back); `dispatcher.py` parallel fan-out
 - `alerts.py` state-based alerts, Telegram; `mock.py` mock feed/Shelly/Telegram; `selftest.py`; `cli.py`
-- `lights.py` manual colour/effect scenes; `pollstats.py` per-minute poll history; `deadman.py` optional external ping; `commands.py` web -> service command queue (test event, Telegram test)
+- `lights.py` manual colour/effect scenes; `pollstats.py` per-minute poll history; `deadman.py` optional external ping; `pushfeeds.py` extra feeds -> Pushover only (no devices); `commands.py` web -> service command queue (test event, Telegram test)
 - `web.py` (server) + `webpages.py`/`webstats.py`/`webcharts.py`/`webexport.py`/`webstyle.py` (HTML, SVG charts, CSV/JSON/metrics, CSS) + `settings.py`: separate `sherpa web` process (stdlib, no JS) reading the DB and `status.json`, editing `config/config.yaml`; the service watches the file and restarts itself (exit 75) on a valid change
 
 ## Invariants - do not break
@@ -29,6 +29,9 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - A real alert on a colour/dimmer output blinks (`alert_effect: blink`, red by default) until a person turns it off
   (`Scenes.start_alert`): every frame carries the alert's full device timer and the dim phase is never dark, so a dead
   SHERPA leaves the light lit until that timer ends. Only OFF is accepted while it runs; relays stay solid.
+- `push_feeds` (Pushover) are a separate failure domain: they never switch a device, never use the `events` table (so
+  they cannot open the real-alert safety windows), their errors go through the normal alerts, they use their own dedupe
+  table, ignore stale items on the first poll, retry an undelivered item until delivered (dropped loudly after 2 h).
 - Only `sherpa run` may ping the dead-man URL (selftest/test-event must not report "alive").
 - An invalid config must never stop SHERPA: it runs the last-good copy (`--fallback`) and alerts until fixed.
 - Per-poll alerts use hysteresis (3 polls); alert queue is bounded and device alerts go first.
