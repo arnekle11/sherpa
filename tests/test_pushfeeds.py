@@ -182,3 +182,76 @@ def test_rules_use_the_map_location_and_wait_briefly_for_it(tmp_path, monkeypatc
                             "Tehnična pomoč 17. 11. 2026 10:15"], sorted(msgs)
     assert "občina Idrija" in msgs["Tehnična pomoč 17. 11. 2026 10:05"]["message"]
     assert st["filtered"] == 2 and st["notified"] == 3
+
+
+# real Nominatim answers (address part) for these points, 18. 11. 2026
+ADDR = {
+    (45.908, 14.023): {"road": "Strmec", "village": "Črni Vrh", "municipality": "Idrija"},
+    (46.004, 14.027): {"house_number": "6a", "road": "Grilčeva ulica", "quarter": "Grilčeva", "suburb": "Bašerija",
+                       "town": "Idrija", "municipality": "Idrija"},
+    (46.031, 14.030): {"house_number": "12", "road": "Pod brezami", "village": "Spodnja Idrija", "municipality": "Idrija"},
+    (46.000, 14.033): {"house_number": "33", "road": "Gregorčičeva ulica", "hamlet": "Zagoda", "town": "Idrija",
+                       "municipality": "Idrija"},
+}
+PLACE_RULE = dict(title_contains=["Tehnična pomoč", "Dimniški požar"], place="Idrija")
+
+
+@pytest.mark.parametrize("point,sent", [((46.004, 14.027), True), ((46.000, 14.033), True),
+                                        ((45.908, 14.023), False), ((46.031, 14.030), False)])
+def test_place_is_the_settlement_not_the_municipality(point, sent):
+    from sherpa.config import PushRule
+    from sherpa.pushfeeds import Location, matching_rule, rule_verdict, settlement_of
+    t = "Dimniški požar 1"
+    loc = Location(*point, obcina="Idrija", settlement=settlement_of(ADDR[point]))
+    assert (rule_verdict(matching_rule([PushRule(**PLACE_RULE)], t), t, "", loc) is None) is sent
+
+
+def test_place_rule_end_to_end_with_the_nearest_address(tmp_path, monkeypatch):
+    from sherpa import pushfeeds
+    monkeypatch.setattr(pushfeeds, "LOCATION_WAIT_S", 4)
+    monkeypatch.setattr(pushfeeds, "GEO_SPACING_S", 0.2)
+
+    async def go():
+        main, push, sh, po = MockFeed().start(), MockFeed().start(), MockShelly(2).start(), MockPushover().start()
+        push.addresses.update(ADDR)
+        app = _app(tmp_path, main, push, sh, po, poll_interval_s=2, rules=[PLACE_RULE],
+                   location_url=push.location_url, geocode_url=push.geocode_url)
+        t = asyncio.create_task(app.run())
+        await asyncio.sleep(0.8)
+        for title, point in (("Tehnična pomoč A", (46.004, 14.027)), ("Dimniški požar B", (46.031, 14.030)),
+                             ("Tehnična pomoč C", (45.908, 14.023)), ("Dimniški požar D", (45.700, 14.500)),
+                             ("Požar E", (45.908, 14.023))):
+            push.set_location(push.add_item(title, ""), *point, "Idrija")
+        await asyncio.sleep(6)
+        msgs, st, calls = {m["title"]: m for m in po.messages}, app.push_feeds[0].snapshot(), list(push.geocode_calls)
+        app.stop(); await asyncio.wait_for(t, 15)
+        for x in (main, push, sh, po): x.stop()
+        return msgs, st, calls
+
+    msgs, st, calls = asyncio.run(go())
+    assert sorted(msgs) == ["Požar E", "Tehnična pomoč A"], sorted(msgs)   # Spodnja Idrija, Črni Vrh, nowhere: no
+    assert "Grilčeva ulica 6a, Idrija" in msgs["Tehnična pomoč A"]["message"]
+    assert "Strmec, Črni Vrh" in msgs["Požar E"]["message"]
+    assert st["filtered"] == 3 and len(calls) == 5, "one lookup per event, never repeated"
+
+
+def test_place_rule_fails_closed_when_the_address_lookup_is_down(tmp_path, monkeypatch):
+    from sherpa import pushfeeds
+    monkeypatch.setattr(pushfeeds, "LOCATION_WAIT_S", 3)
+    monkeypatch.setattr(pushfeeds, "GEO_SPACING_S", 0.1)
+
+    async def go():
+        main, push, sh, po = MockFeed().start(), MockFeed().start(), MockShelly(2).start(), MockPushover().start()
+        app = _app(tmp_path, main, push, sh, po, poll_interval_s=2, rules=[PLACE_RULE],
+                   location_url=push.location_url, geocode_url="http://127.0.0.1:9/reverse")
+        t = asyncio.create_task(app.run())
+        await asyncio.sleep(0.8)
+        push.set_location(push.add_item("Tehnična pomoč A", ""), 46.004, 14.027, "Idrija")
+        push.add_item("Požar B", "")                                    # not restricted: still sent
+        await asyncio.sleep(7)
+        res = (sorted(m["title"] for m in po.messages), app.alerts.is_active("pushfeed:Idrija:geocode"))
+        app.stop(); await asyncio.wait_for(t, 15)
+        for x in (main, push, sh, po): x.stop()
+        return res
+
+    assert asyncio.run(go()) == (["Požar B"], True)

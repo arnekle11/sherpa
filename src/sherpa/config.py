@@ -54,10 +54,12 @@ class AlertsCfg(_Base):
 class PushRule(_Base):
     """For items whose title contains one of `title_contains`: notify only if the event is at the place.
 
-    The place is the event's approximate map location (within `radius_km` of `near_lat`/`near_lon`), or, as a second
+    The place is the settlement (naselje) of the address nearest to the event's approximate map location (`place`,
+    exact match: "Spodnja Idrija" is not "Idrija"), or that location within `radius_km` of `near_lat`/`near_lon`, or, as a second
     way in, its description naming it (`require_any`; case and diacritics ignored, `ignore_phrases` such as
     "PGD Idrija" removed first). No location and no matching text means: do NOT notify (fail closed)."""
     title_contains: list[str] = Field(min_length=1)
+    place: str = ""
     near_lat: float | None = Field(None, ge=-90, le=90)
     near_lon: float | None = Field(None, ge=-180, le=180)
     radius_km: float = Field(2.5, gt=0, le=100)
@@ -68,8 +70,8 @@ class PushRule(_Base):
     def _some_place(self) -> "PushRule":
         if (self.near_lat is None) != (self.near_lon is None):
             raise ValueError("near_lat and near_lon go together")
-        if self.near_lat is None and not self.require_any:
-            raise ValueError("a rule needs near_lat/near_lon or require_any")
+        if self.near_lat is None and not self.require_any and not self.place.strip():
+            raise ValueError("a rule needs place, near_lat/near_lon or require_any")
         return self
 
 
@@ -87,6 +89,8 @@ class PushFeedCfg(_Base):
     rules: list[PushRule] = []                    # the first rule whose title matches decides; no match = notify
     # SPIN's map asks this for an event's approximate location; {id} = the number at the end of the item's link
     location_url: str = "https://spin3.sos112.si/api/javno/lokacija/{id}"
+    # reverse geocoding (nearest address) for rules with `place`; OpenStreetMap Nominatim allows 1 request/s
+    geocode_url: str = "https://nominatim.openstreetmap.org/reverse"
     user_agent: str = "SHERPA (private first-responder notifier)"
 
 

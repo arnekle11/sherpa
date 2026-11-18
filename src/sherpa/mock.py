@@ -72,6 +72,15 @@ class _FeedHandler(_Quiet):
             if loc is None:
                 return self._send(404, b'{"statusCode":404}')
             return self._send(200, json.dumps({"value": loc, "statusCode": 200}).encode())
+        if u.path == "/reverse":  # a tiny Nominatim: the nearest of f.addresses within ~300 m
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            lat, lon = float(q["lat"]), float(q["lon"])
+            with f.lock:
+                f.geocode_calls.append((lat, lon))
+                near = [(abs(a - lat) + abs(b - lon), addr) for (a, b), addr in f.addresses.items()]
+            near = [x for x in near if x[0] < 0.004]
+            body = {"address": min(near, key=lambda x: x[0])[1]} if near else {"error": "Unable to geocode"}
+            return self._send(200, json.dumps(body).encode())
         if u.path != "/feed":
             return self._send(404, b"not found", "text/plain")
         with f.lock:
@@ -107,6 +116,8 @@ class MockFeed(_Server):
         self.channel_link = "https://spin3.sos112.si/javno/OD/52034"
         self._next_id = 100000
         self.locations: dict[str, dict] = {}  # event id -> /api/javno/lokacija value
+        self.addresses: dict[tuple[float, float], dict] = {}  # (lat, lon) -> Nominatim "address"
+        self.geocode_calls: list[tuple[float, float]] = []
 
     @property
     def url(self) -> str:
@@ -124,6 +135,10 @@ class MockFeed(_Server):
     @property
     def location_url(self) -> str:
         return f"http://{self.hostport}/api/javno/lokacija/{{id}}"
+
+    @property
+    def geocode_url(self) -> str:
+        return f"http://{self.hostport}/reverse"
 
     def set_location(self, guid: str, lat: float, lon: float, obcina: str = "") -> None:
         with self.lock:

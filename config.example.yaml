@@ -17,11 +17,9 @@ push_feeds: []
 #    expected_link_contains: "OD/4279"
 #    rules:                 # only for these types: notify only if the event is in the town (fail closed)
 #      - title_contains: ["Tehnična pomoč", "Dimniški požar"]
-#        near_lat: 46.0022      # Idrija, Mestni trg; the map location of the event must be within radius_km
-#        near_lon: 14.0280
-#        radius_km: 2.5
-#        require_any: ["Idriji", "mestu Idrija"]   # optional second way in: the description names the place
-#        ignore_phrases: ["PGD Idrija", "NMP Idrija", "občini Idrija"]
+#        place: Idrija          # settlement (naselje) of the address nearest to the event's map location; exact match,
+#                               # so "Spodnja Idrija" or a village in občina Idrija is NOT "Idrija"
+#        # alternatives: near_lat/near_lon/radius_km (distance), require_any/ignore_phrases (description text)
 
 devices:
   - name: led-bar-1

@@ -14,7 +14,7 @@ import os
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -42,6 +42,8 @@ class Location:
     lon: float
     obcina: str = ""
     kind: str = ""
+    settlement: str | None = None   # naselje of the nearest address; None = not looked up / lookup failed
+    address: str = ""
 
 
 def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -49,6 +51,19 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = (math.sin((p2 - p1) / 2) ** 2
          + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
     return 2 * 6371.0 * math.asin(math.sqrt(a))
+
+
+_GEO_LOCK = asyncio.Lock()
+_GEO_LAST = 0.0
+GEO_SPACING_S = 1.1     # Nominatim's usage policy: at most one request per second
+
+
+def settlement_of(addr: dict) -> str:
+    """The naselje of a Nominatim address: city/town/village (a hamlet or quarter is a part of one)."""
+    for k in ("city", "town", "village", "hamlet", "isolated_dwelling"):
+        if addr.get(k):
+            return str(addr[k])
+    return ""
 
 
 def matching_rule(rules, title: str):
@@ -60,13 +75,16 @@ def rule_verdict(rule, title: str, description: str, loc: Location | None) -> st
     """None = notify. Otherwise the reason it is held back (fail closed: an unknown place is not "Idrija")."""
     if rule is None:
         return None
-    if rule.near_lat is not None and loc is not None:
+    where = "no location"
+    if rule.place and loc is not None and loc.settlement is not None:
+        if _norm(loc.settlement) == _norm(rule.place):
+            return None
+        where = f"nearest address in {loc.settlement or 'no settlement'}" + (f" ({loc.address})" if loc.address else "")
+    elif rule.near_lat is not None and loc is not None:
         km = distance_km(rule.near_lat, rule.near_lon, loc.lat, loc.lon)
         if km <= rule.radius_km:
             return None
         where = f"{km:.1f} km away" + (f" (občina {loc.obcina})" if loc.obcina else "")
-    else:
-        where = "no location"
     if rule.require_any:
         d = _norm(description)
         for ph in rule.ignore_phrases:
@@ -139,6 +157,7 @@ class PushFeed:
         self._loc_cache: dict[str, Location] = {}
         self._waiting_since: dict[str, float] = {}   # guid -> monotonic time its location was first missing
         self._bad_locs = 0
+        self._bad_geo = 0
 
     @property
     def _key(self) -> str:
@@ -204,6 +223,40 @@ class PushFeed:
         self._loc_cache[it.guid] = loc
         return loc
 
+    async def _geocode(self, it: FeedItem, loc: Location) -> Location:
+        """loc with the nearest address filled in; settlement stays None if the lookup failed (retried later)."""
+        global _GEO_LAST
+        try:
+            async with _GEO_LOCK:
+                wait = _GEO_LAST + GEO_SPACING_S - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                try:
+                    r = await asyncio.wait_for(self.fetcher.client.get(self.cfg.geocode_url, params={
+                        "format": "jsonv2", "lat": f"{loc.lat}", "lon": f"{loc.lon}", "zoom": "18",
+                        "addressdetails": "1", "accept-language": "sl"}, headers={"Accept": "application/json"}),
+                        self.cfg.timeout_s)
+                finally:
+                    _GEO_LAST = time.monotonic()
+            if r.status_code != 200:
+                raise FetchError(f"HTTP {r.status_code}")
+            d = r.json()
+            addr = d.get("address") or {}  # {"error": "Unable to geocode"} = nothing near: no settlement, a real answer
+            road = " ".join(x for x in (addr.get("road", ""), addr.get("house_number", "")) if x)
+            settlement = settlement_of(addr)
+            done = replace(loc, settlement=settlement, address=", ".join(x for x in (road, settlement) if x))
+        except Exception as e:
+            self._bad_geo += 1
+            log.warning("push feed %s: no address for %s: %s", self.cfg.name, it.guid, f"{type(e).__name__}: {e}"[:200])
+            if self._bad_geo >= FAIL_AFTER:
+                self.alerts.raise_(f"{self._key}:geocode", f"push feed '{self.cfg.name}': the address lookup "
+                                   f"({self.cfg.geocode_url}) does not answer; restricted types are NOT notified")
+            return loc
+        self._bad_geo = 0
+        self.alerts.clear(f"{self._key}:geocode", f"push feed '{self.cfg.name}': address lookup works again")
+        self._loc_cache[it.guid] = done
+        return done
+
     def _forget(self, guid: str) -> None:
         self._loc_cache.pop(guid, None)
         self._waiting_since.pop(guid, None)
@@ -221,7 +274,10 @@ class PushFeed:
                 continue
             rule = matching_rule(self.cfg.rules, it.title)
             loc = await self._location(it)
-            if rule is not None and rule.near_lat is not None and loc is None:
+            if loc is not None and loc.settlement is None and any(r.place for r in self.cfg.rules):
+                loc = await self._geocode(it, loc)  # also names the place in every notification
+            needs = rule is not None and (rule.near_lat is not None or bool(rule.place))
+            if needs and (loc is None or (rule.place and loc.settlement is None)):
                 # the location may simply not be readable yet: look again on the next polls, then give up (fail closed)
                 since = self._waiting_since.setdefault(it.guid, time.monotonic())
                 if time.monotonic() - since < LOCATION_WAIT_S:
@@ -245,7 +301,7 @@ class PushFeed:
                                  f"{int(age.total_seconds() // 60)} min")
                 continue
             local = it.pub_date.astimezone().strftime("%d.%m.%Y %H:%M") if it.pub_date else ""
-            place = f"občina {loc.obcina}" if loc and loc.obcina else ""
+            place = (f"~{loc.address}" if loc and loc.address else (f"občina {loc.obcina}" if loc and loc.obcina else ""))
             body = " | ".join(x for x in (place, it.description, local) if x) or it.title
             ok = await self.notifier.send(it.title or name, body, it.link, "Zemljevid", self.cfg.priority,
                                           self.cfg.sound, int(it.pub_date.timestamp()) if it.pub_date else None)
