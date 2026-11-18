@@ -57,8 +57,10 @@ class PushRule(_Base):
     The place is the settlement (naselje) of the address nearest to the event's approximate map location (`place`,
     exact match: "Spodnja Idrija" is not "Idrija"), or that location within `radius_km` of `near_lat`/`near_lon`, or, as a second
     way in, its description naming it (`require_any`; case and diacritics ignored, `ignore_phrases` such as
-    "PGD Idrija" removed first). No location and no matching text means: do NOT notify (fail closed)."""
+    "PGD Idrija" removed first). No location and no matching text means: do NOT notify (fail closed).
+    `never: true` drops these items whatever the place."""
     title_contains: list[str] = Field(min_length=1)
+    never: bool = False
     place: str = ""
     near_lat: float | None = Field(None, ge=-90, le=90)
     near_lon: float | None = Field(None, ge=-180, le=180)
@@ -70,7 +72,7 @@ class PushRule(_Base):
     def _some_place(self) -> "PushRule":
         if (self.near_lat is None) != (self.near_lon is None):
             raise ValueError("near_lat and near_lon go together")
-        if self.near_lat is None and not self.require_any and not self.place.strip():
+        if not self.never and self.near_lat is None and not self.require_any and not self.place.strip():
             raise ValueError("a rule needs place, near_lat/near_lon or require_any")
         return self
 

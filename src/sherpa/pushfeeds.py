@@ -75,6 +75,8 @@ def rule_verdict(rule, title: str, description: str, loc: Location | None) -> st
     """None = notify. Otherwise the reason it is held back (fail closed: an unknown place is not "Idrija")."""
     if rule is None:
         return None
+    if rule.never:
+        return f"'{title}': this type is never notified"
     where = "no location"
     if rule.place and loc is not None and loc.settlement is not None:
         if _norm(loc.settlement) == _norm(rule.place):
@@ -273,10 +275,11 @@ class PushFeed:
                 self.store.push_record(name, it, now, "ignored_old")
                 continue
             rule = matching_rule(self.cfg.rules, it.title)
-            loc = await self._location(it)
+            # a dropped type needs no location (and costs no geocoding request)
+            loc = None if rule is not None and rule.never else await self._location(it)
             if loc is not None and loc.settlement is None and any(r.place for r in self.cfg.rules):
                 loc = await self._geocode(it, loc)  # also names the place in every notification
-            needs = rule is not None and (rule.near_lat is not None or bool(rule.place))
+            needs = rule is not None and not rule.never and (rule.near_lat is not None or bool(rule.place))
             if needs and (loc is None or (rule.place and loc.settlement is None)):
                 # the location may simply not be readable yet: look again on the next polls, then give up (fail closed)
                 since = self._waiting_since.setdefault(it.guid, time.monotonic())

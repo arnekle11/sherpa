@@ -235,6 +235,35 @@ def test_place_rule_end_to_end_with_the_nearest_address(tmp_path, monkeypatch):
     assert st["filtered"] == 3 and len(calls) == 5, "one lookup per event, never repeated"
 
 
+def test_never_rule_drops_a_type_everywhere_without_looking_it_up(tmp_path, monkeypatch):
+    from sherpa import pushfeeds
+    from sherpa.config import PushRule
+    monkeypatch.setattr(pushfeeds, "GEO_SPACING_S", 0.2)
+    assert PushRule(title_contains=["x"], never=True).never
+
+    async def go():
+        main, push, sh, po = MockFeed().start(), MockFeed().start(), MockShelly(2).start(), MockPushover().start()
+        push.addresses.update(ADDR)
+        app = _app(tmp_path, main, push, sh, po, poll_interval_s=2,
+                   rules=[dict(title_contains=["Tehnična pomoč"], never=True),
+                          dict(title_contains=["Dimniški požar"], place="Idrija")],
+                   location_url=push.location_url, geocode_url=push.geocode_url)
+        t = asyncio.create_task(app.run())
+        await asyncio.sleep(0.8)
+        push.set_location(push.add_item("Tehnična pomoč A", ""), 46.004, 14.027, "Idrija")   # in town, still not
+        push.set_location(push.add_item("Dimniški požar B", ""), 46.004, 14.027, "Idrija")   # in town: sent
+        await asyncio.sleep(4)
+        msgs, st, calls = [m["title"] for m in po.messages], app.push_feeds[0].snapshot(), list(push.geocode_calls)
+        app.stop(); await asyncio.wait_for(t, 15)
+        for x in (main, push, sh, po): x.stop()
+        return msgs, st, calls
+
+    msgs, st, calls = asyncio.run(go())
+    assert msgs == ["Dimniški požar B"], msgs
+    assert st["filtered"] == 1 and "never notified" in st["last_filtered"]
+    assert len(calls) == 1, "the dropped type costs no address lookup"
+
+
 def test_place_rule_fails_closed_when_the_address_lookup_is_down(tmp_path, monkeypatch):
     from sherpa import pushfeeds
     monkeypatch.setattr(pushfeeds, "LOCATION_WAIT_S", 3)

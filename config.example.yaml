@@ -16,7 +16,9 @@ push_feeds: []
 #    priority: 1            # 1 = high (rings through quiet hours), 0 = normal, -1 = quiet
 #    expected_link_contains: "OD/4279"
 #    rules:                 # only for these types: notify only if the event is in the town (fail closed)
-#      - title_contains: ["Tehnična pomoč", "Dimniški požar"]
+#      - title_contains: ["Tehnična pomoč"]
+#        never: true            # this type is never notified
+#      - title_contains: ["Dimniški požar"]
 #        place: Idrija          # settlement (naselje) of the address nearest to the event's map location; exact match,
 #                               # so "Spodnja Idrija" or a village in občina Idrija is NOT "Idrija"
 #        # alternatives: near_lat/near_lon/radius_km (distance), require_any/ignore_phrases (description text)
