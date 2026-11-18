@@ -52,13 +52,25 @@ class AlertsCfg(_Base):
 
 
 class PushRule(_Base):
-    """For items whose title contains one of `title_contains`: notify only if the description names the place.
+    """For items whose title contains one of `title_contains`: notify only if the event is at the place.
 
-    Matching ignores case and diacritics. `ignore_phrases` are removed from the description first (e.g. "PGD Idrija"
-    names the fire brigade, not the place of the event). A missing or unclear place means: do NOT notify."""
+    The place is the event's approximate map location (within `radius_km` of `near_lat`/`near_lon`), or, as a second
+    way in, its description naming it (`require_any`; case and diacritics ignored, `ignore_phrases` such as
+    "PGD Idrija" removed first). No location and no matching text means: do NOT notify (fail closed)."""
     title_contains: list[str] = Field(min_length=1)
-    require_any: list[str] = Field(min_length=1)
+    near_lat: float | None = Field(None, ge=-90, le=90)
+    near_lon: float | None = Field(None, ge=-180, le=180)
+    radius_km: float = Field(2.5, gt=0, le=100)
+    require_any: list[str] = []
     ignore_phrases: list[str] = []
+
+    @model_validator(mode="after")
+    def _some_place(self) -> "PushRule":
+        if (self.near_lat is None) != (self.near_lon is None):
+            raise ValueError("near_lat and near_lon go together")
+        if self.near_lat is None and not self.require_any:
+            raise ValueError("a rule needs near_lat/near_lon or require_any")
+        return self
 
 
 class PushFeedCfg(_Base):
@@ -73,6 +85,8 @@ class PushFeedCfg(_Base):
     sound: str = Field("", pattern=r"^[a-z_]*$")  # Pushover sound name, empty = the app's default
     expected_link_contains: str | None = None
     rules: list[PushRule] = []                    # the first rule whose title matches decides; no match = notify
+    # SPIN's map asks this for an event's approximate location; {id} = the number at the end of the item's link
+    location_url: str = "https://spin3.sos112.si/api/javno/lokacija/{id}"
     user_agent: str = "SHERPA (private first-responder notifier)"
 
 

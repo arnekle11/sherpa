@@ -66,6 +66,12 @@ class _FeedHandler(_Quiet):
     def do_GET(self):
         f: MockFeed = self.server.owner  # type: ignore[attr-defined]
         u = urlparse(self.path)
+        if u.path.startswith("/api/javno/lokacija/"):  # what the SPIN map asks for one event
+            with f.lock:
+                loc = f.locations.get(u.path.rsplit("/", 1)[1])
+            if loc is None:
+                return self._send(404, b'{"statusCode":404}')
+            return self._send(200, json.dumps({"value": loc, "statusCode": 200}).encode())
         if u.path != "/feed":
             return self._send(404, b"not found", "text/plain")
         with f.lock:
@@ -100,6 +106,7 @@ class MockFeed(_Server):
         self.mode = "ok"  # ok | 500 | garbage | slow
         self.channel_link = "https://spin3.sos112.si/javno/OD/52034"
         self._next_id = 100000
+        self.locations: dict[str, dict] = {}  # event id -> /api/javno/lokacija value
 
     @property
     def url(self) -> str:
@@ -113,6 +120,14 @@ class MockFeed(_Server):
             pub = datetime.fromtimestamp(time.time() - age_s, UTC)
             self.items.append({"guid": guid, "title": title, "description": description, "pub": pub})
         return guid
+
+    @property
+    def location_url(self) -> str:
+        return f"http://{self.hostport}/api/javno/lokacija/{{id}}"
+
+    def set_location(self, guid: str, lat: float, lon: float, obcina: str = "") -> None:
+        with self.lock:
+            self.locations[guid.rsplit("/", 1)[1]] = {"wgsLatApprox": lat, "wgsLonApprox": lon, "obcinaNaziv": obcina}
 
     def set_description(self, guid: str, text: str) -> None:
         with self.lock:

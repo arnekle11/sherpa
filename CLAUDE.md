@@ -32,6 +32,7 @@ Polls a public SOS 112 RSS feed (server-side filtered), and on each *new guid* s
 - `push_feeds` (Pushover) are a separate failure domain: they never switch a device, never use the `events` table (so
   they cannot open the real-alert safety windows), their errors go through the normal alerts, they use their own dedupe
   table, ignore stale items on the first poll, retry an undelivered item until delivered (dropped loudly after 2 h).
+  Their `rules` fail CLOSED (unknown place = no notification), the opposite of the LED path, by the operator's choice.
 - Only `sherpa run` may ping the dead-man URL (selftest/test-event must not report "alive").
 - An invalid config must never stop SHERPA: it runs the last-good copy (`--fallback`) and alerts until fixed.
 - Per-poll alerts use hysteresis (3 polls); alert queue is bounded and device alerts go first.

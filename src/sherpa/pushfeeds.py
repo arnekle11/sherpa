@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import re
 import time
 import unicodedata
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -23,6 +26,7 @@ log = logging.getLogger("sherpa.push")
 
 PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
 FAIL_AFTER = 3          # consecutive bad polls/sends before an alert (one odd response is noise)
+LOCATION_WAIT_S = 120   # a restricted item whose location cannot be read yet is re-checked this long, then dropped
 GIVE_UP_AFTER = timedelta(hours=2)   # an item that still cannot be delivered after this long is dropped, loudly
 
 
@@ -32,18 +36,44 @@ def _norm(text: str) -> str:
     return " ".join("".join(c for c in t if not unicodedata.combining(c)).split())
 
 
-def rule_verdict(rules, title: str, description: str) -> str | None:
-    """None = notify. Otherwise the reason it is held back (fail closed: an unclear place is not "Idrija")."""
+@dataclass(frozen=True)
+class Location:
+    lat: float
+    lon: float
+    obcina: str = ""
+    kind: str = ""
+
+
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 2 * 6371.0 * math.asin(math.sqrt(a))
+
+
+def matching_rule(rules, title: str):
     t = _norm(title)
-    for r in rules:
-        if any(_norm(x) in t for x in r.title_contains):
-            d = _norm(description)
-            for ph in r.ignore_phrases:
-                d = d.replace(_norm(ph), " ")
-            if any(_norm(x) in d for x in r.require_any):
-                return None
-            return f"'{title}' without {' / '.join(r.require_any)} in the description"
-    return None
+    return next((r for r in rules if any(_norm(x) in t for x in r.title_contains)), None)
+
+
+def rule_verdict(rule, title: str, description: str, loc: Location | None) -> str | None:
+    """None = notify. Otherwise the reason it is held back (fail closed: an unknown place is not "Idrija")."""
+    if rule is None:
+        return None
+    if rule.near_lat is not None and loc is not None:
+        km = distance_km(rule.near_lat, rule.near_lon, loc.lat, loc.lon)
+        if km <= rule.radius_km:
+            return None
+        where = f"{km:.1f} km away" + (f" (občina {loc.obcina})" if loc.obcina else "")
+    else:
+        where = "no location"
+    if rule.require_any:
+        d = _norm(description)
+        for ph in rule.ignore_phrases:
+            d = d.replace(_norm(ph), " ")
+        if any(_norm(x) in d for x in rule.require_any):
+            return None
+    return f"'{title}': {where}" + (f", and no {' / '.join(rule.require_any)} in the description" if rule.require_any else "")
 
 
 def pushover_from_env() -> tuple[str, str] | None:
@@ -106,6 +136,9 @@ class PushFeed:
         self.last_error = ""
         self.filtered = 0
         self.last_filtered = ""
+        self._loc_cache: dict[str, Location] = {}
+        self._waiting_since: dict[str, float] = {}   # guid -> monotonic time its location was first missing
+        self._bad_locs = 0
 
     @property
     def _key(self) -> str:
@@ -147,6 +180,34 @@ class PushFeed:
             self.alerts.clear(f"{self._key}:link", f"push feed '{self.cfg.name}' self-link is as expected again")
         await self._handle(parsed.items)
 
+    async def _location(self, it: FeedItem) -> Location | None:
+        """The event's approximate map location, or None (never raises; repeated failures alert)."""
+        if it.guid in self._loc_cache:
+            return self._loc_cache[it.guid]
+        m = re.search(r"/(\d+)/?$", it.link or it.guid) or re.search(r"/(\d+)/?$", it.guid)
+        if not m:
+            return None
+        try:
+            r = await asyncio.wait_for(self.fetcher.client.get(self.cfg.location_url.format(id=m[1])), self.cfg.timeout_s)
+            v = r.json().get("value") if r.status_code == 200 else None
+            loc = Location(float(v["wgsLatApprox"]), float(v["wgsLonApprox"]), str(v.get("obcinaNaziv") or ""),
+                           str(v.get("intervencijaVrstaNaziv") or ""))
+        except Exception as e:
+            self._bad_locs += 1
+            log.warning("push feed %s: no location for %s: %s", self.cfg.name, it.guid, f"{type(e).__name__}: {e}"[:200])
+            if self._bad_locs >= FAIL_AFTER:
+                self.alerts.raise_(f"{self._key}:location", f"push feed '{self.cfg.name}': the event location service "
+                                   "does not answer; restricted types (rules) are NOT notified until it does")
+            return None
+        self._bad_locs = 0
+        self.alerts.clear(f"{self._key}:location", f"push feed '{self.cfg.name}': event locations are readable again")
+        self._loc_cache[it.guid] = loc
+        return loc
+
+    def _forget(self, guid: str) -> None:
+        self._loc_cache.pop(guid, None)
+        self._waiting_since.pop(guid, None)
+
     async def _handle(self, items: list[FeedItem]) -> None:
         name, now = self.cfg.name, datetime.now(UTC)
         max_age = timedelta(minutes=self.cfg.max_age_min)
@@ -158,8 +219,16 @@ class PushFeed:
             if self._first and (age is None or age > max_age):
                 self.store.push_record(name, it, now, "ignored_old")
                 continue
-            why = rule_verdict(self.cfg.rules, it.title, it.description)
+            rule = matching_rule(self.cfg.rules, it.title)
+            loc = await self._location(it)
+            if rule is not None and rule.near_lat is not None and loc is None:
+                # the location may simply not be readable yet: look again on the next polls, then give up (fail closed)
+                since = self._waiting_since.setdefault(it.guid, time.monotonic())
+                if time.monotonic() - since < LOCATION_WAIT_S:
+                    continue
+            why = rule_verdict(rule, it.title, it.description, loc)
             if why:  # a deliberate "no": remembered, so it is neither retried nor sent later
+                self._forget(it.guid)
                 self.store.push_record(name, it, now, "filtered")
                 self.filtered += 1
                 self.last_filtered = why
@@ -170,15 +239,18 @@ class PushFeed:
                                                "(SHERPA_PUSHOVER_TOKEN / SHERPA_PUSHOVER_USER in .env)")
                 continue  # not recorded: it is delivered once Pushover works, if still young
             if age is not None and age > GIVE_UP_AFTER:
+                self._forget(it.guid)
                 self.store.push_record(name, it, now, "dropped_old")
                 self.alerts.info(f"push feed '{name}': dropped '{it.title}' after failing to deliver it for "
                                  f"{int(age.total_seconds() // 60)} min")
                 continue
             local = it.pub_date.astimezone().strftime("%d.%m.%Y %H:%M") if it.pub_date else ""
-            body = " | ".join(x for x in (it.description, local) if x) or it.title
+            place = f"občina {loc.obcina}" if loc and loc.obcina else ""
+            body = " | ".join(x for x in (place, it.description, local) if x) or it.title
             ok = await self.notifier.send(it.title or name, body, it.link, "Zemljevid", self.cfg.priority,
                                           self.cfg.sound, int(it.pub_date.timestamp()) if it.pub_date else None)
             if ok:
+                self._forget(it.guid)
                 self.store.push_record(name, it, now, "notified")
                 self.notified += 1
                 sent_any = True

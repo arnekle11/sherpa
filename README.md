@@ -81,6 +81,9 @@ notification (title, place and time, link to the map). Old items are not sent wh
 is retried, and a feed or Pushover problem raises a normal SHERPA alert. The feeds are not editable in the web UI yet,
 but saving settings there keeps them.
 
-A push feed can have `rules`: for items whose title matches a rule, the description must name the place (matching
-ignores case and diacritics, `ignore_phrases` are removed first); otherwise nothing is sent, and the item is logged as
-`PUSH_FILTERED`. Types without a rule are always sent. A missing place means "do not notify" for those types.
+A push feed can have `rules`: for items whose title matches a rule, the event must be in the place, judged by its
+approximate map location (SPIN's `/api/javno/lokacija/<id>`, the same the public map uses; within `radius_km` of
+`near_lat`/`near_lon`), or by the description naming it (`require_any`, case and diacritics ignored, `ignore_phrases`
+removed first). The location is usually there before the description. If it cannot be read, SHERPA looks again for
+2 minutes, then does NOT notify (logged as `PUSH_FILTERED`); repeated location failures raise an alert. Types without a
+rule are always sent, and the notification names the občina when the location is known.

@@ -107,41 +107,78 @@ def test_without_pushover_credentials_it_says_so(tmp_path):
     assert asyncio.run(go()) is True
 
 
-RULE = dict(title_contains=["Tehnična pomoč", "Dimniški požar"], require_any=["Idriji", "mestu Idrija"],
-            ignore_phrases=["PGD Idrija", "NMP Idrija", "občini Idrija"])
+
+IDRIJA = (46.0025, 14.0303)
+RULE = dict(title_contains=["Tehnična pomoč", "Dimniški požar"], near_lat=IDRIJA[0], near_lon=IDRIJA[1], radius_km=2.5)
+TEXT_RULE = dict(title_contains=["Tehnična pomoč", "Dimniški požar"], require_any=["Idriji", "mestu Idrija"],
+                 ignore_phrases=["PGD Idrija", "NMP Idrija", "občini Idrija"])
 
 
-@pytest.mark.parametrize("title,desc,sent", [
-    ("Tehnična pomoč 17. 11. 2026 10:00", "Gasilci PGD Idrija so črpali vodo iz kleti v Idriji.", True),
-    ("Dimniški požar 17. 11. 2026 10:00", "Požar v dimniku stanovanjske hiše v mestu Idrija.", True),
-    ("TEHNICNA POMOC 1", "Odpiranje vrat na Titovi cesti v Idriji.", True),            # case + diacritics
-    ("Tehnična pomoč 17. 11. 2026 10:00", "Na cesti Črni vrh–Col, občina Idrija. Gasilci PGD Idrija, NMP Idrija.", False),
-    ("Dimniški požar 17. 11. 2026 10:00", "Dimnik v Cerknem. Posredovali PGD Idrija.", False),
-    ("Dimniški požar 17. 11. 2026 10:00", "", False),                                    # no place: fail closed
-    ("Požar v naravi 17. 11. 2026 10:00", "Travnik pri Cerknem.", True),                 # other types: not restricted
-    ("Prometna nesreča 17. 11. 2026 10:00", "", True),
+@pytest.mark.parametrize("title,loc,desc,sent", [
+    ("Tehnična pomoč 17. 11. 2026 10:00", (46.004, 14.027), "", True),          # in town, no description yet
+    ("Dimniški požar 17. 11. 2026 10:00", (45.995, 14.041), "", True),
+    ("TEHNICNA POMOC 1", (46.001, 14.031), "", True),                           # case + diacritics in the title
+    ("Tehnična pomoč 17. 11. 2026 10:00", (45.908, 14.023), "", False),         # Črni vrh, ~10 km: not the town
+    ("Dimniški požar 17. 11. 2026 10:00", (46.130, 13.960), "", False),         # Cerkno
+    ("Dimniški požar 17. 11. 2026 10:00", None, "", False),                     # no location: fail closed
+    ("Požar v naravi 17. 11. 2026 10:00", (46.130, 13.960), "", True),          # other types: not restricted
+    ("Prometna nesreča 17. 11. 2026 10:00", None, "", True),
 ])
-def test_rule_verdict(title, desc, sent):
+def test_rule_verdict_by_location(title, loc, desc, sent):
     from sherpa.config import PushRule
-    from sherpa.pushfeeds import rule_verdict
-    assert (rule_verdict([PushRule(**RULE)], title, desc) is None) is sent
+    from sherpa.pushfeeds import Location, matching_rule, rule_verdict
+    rule = matching_rule([PushRule(**RULE)], title)
+    assert (rule_verdict(rule, title, desc, Location(*loc) if loc else None) is None) is sent
 
 
-def test_filtered_items_are_never_sent_or_retried(tmp_path):
+@pytest.mark.parametrize("desc,sent", [
+    ("Gasilci PGD Idrija so črpali vodo iz kleti v Idriji.", True),
+    ("Na cesti Črni vrh–Col, občina Idrija. Gasilci PGD Idrija, NMP Idrija.", False),
+    ("", False),
+])
+def test_rule_verdict_by_text(desc, sent):
+    from sherpa.config import PushRule
+    from sherpa.pushfeeds import matching_rule, rule_verdict
+    t = "Tehnična pomoč 1"
+    assert (rule_verdict(matching_rule([PushRule(**TEXT_RULE)], t), t, desc, None) is None) is sent
+
+
+def test_rule_needs_a_place():
+    from sherpa.config import PushRule
+    with pytest.raises(ValueError):
+        PushRule(title_contains=["x"])
+    with pytest.raises(ValueError):
+        PushRule(title_contains=["x"], near_lat=46.0)
+
+
+def test_rules_use_the_map_location_and_wait_briefly_for_it(tmp_path, monkeypatch):
+    from sherpa import pushfeeds
+    monkeypatch.setattr(pushfeeds, "LOCATION_WAIT_S", 4)
+
     async def go():
         main, push, sh, po = MockFeed().start(), MockFeed().start(), MockShelly(2).start(), MockPushover().start()
-        app = _app(tmp_path, main, push, sh, po, poll_interval_s=2, rules=[RULE])
+        app = _app(tmp_path, main, push, sh, po, poll_interval_s=2, rules=[RULE], location_url=push.location_url)
         t = asyncio.create_task(app.run())
         await asyncio.sleep(0.8)
-        push.add_item("Dimniški požar 17. 11. 2026 10:00", "Dimnik v Cerknem, PGD Idrija je posredoval.")
-        push.add_item("Tehnična pomoč 17. 11. 2026 10:05", "Poplavljena klet v Idriji.")
-        push.add_item("Požar 17. 11. 2026 10:10", "Grmada pri Cerknem.")
+        g1 = push.add_item("Dimniški požar 17. 11. 2026 10:00", "")          # Cerkno: filtered
+        push.set_location(g1, 46.130, 13.960, "Cerkno")
+        g2 = push.add_item("Tehnična pomoč 17. 11. 2026 10:05", "")          # in town: sent, with the občina
+        push.set_location(g2, 46.004, 14.027, "Idrija")
+        push.add_item("Požar 17. 11. 2026 10:10", "Grmada.")                 # not restricted: sent, no location needed
+        g4 = push.add_item("Tehnična pomoč 17. 11. 2026 10:15", "")          # location appears a bit later: sent
+        push.add_item("Dimniški požar 17. 11. 2026 10:20", "")               # never a location: dropped (fail closed)
+        await asyncio.sleep(2.5)
+        early = [m["title"] for m in po.messages]
+        push.set_location(g4, 46.000, 14.033, "Idrija")
         await asyncio.sleep(7)
-        msgs, st = [m["title"] for m in po.messages], app.push_feeds[0].snapshot()
+        msgs, st = {m["title"]: m for m in po.messages}, app.push_feeds[0].snapshot()
         app.stop(); await asyncio.wait_for(t, 15)
         for x in (main, push, sh, po): x.stop()
-        return msgs, st
+        return early, msgs, st
 
-    msgs, st = asyncio.run(go())
-    assert sorted(msgs) == ["Požar 17. 11. 2026 10:10", "Tehnična pomoč 17. 11. 2026 10:05"], msgs
-    assert st["filtered"] == 1 and st["notified"] == 2 and "Dimniški" in st["last_filtered"]
+    early, msgs, st = asyncio.run(go())
+    assert "Tehnična pomoč 17. 11. 2026 10:15" not in early
+    assert sorted(msgs) == ["Požar 17. 11. 2026 10:10", "Tehnična pomoč 17. 11. 2026 10:05",
+                            "Tehnična pomoč 17. 11. 2026 10:15"], sorted(msgs)
+    assert "občina Idrija" in msgs["Tehnična pomoč 17. 11. 2026 10:05"]["message"]
+    assert st["filtered"] == 2 and st["notified"] == 3
