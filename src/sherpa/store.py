@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS push_items (
   guid       TEXT NOT NULL,
   title      TEXT,
   first_seen TEXT NOT NULL, -- ISO UTC
-  state      TEXT NOT NULL, -- notified|ignored_old|dropped_old
+  state      TEXT NOT NULL, -- notified|ignored_old|dropped_old|filtered
   PRIMARY KEY (feed, guid)
 );
 CREATE TABLE IF NOT EXISTS alert_log (

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import time
+import unicodedata
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -23,6 +24,26 @@ log = logging.getLogger("sherpa.push")
 PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
 FAIL_AFTER = 3          # consecutive bad polls/sends before an alert (one odd response is noise)
 GIVE_UP_AFTER = timedelta(hours=2)   # an item that still cannot be delivered after this long is dropped, loudly
+
+
+def _norm(text: str) -> str:
+    """Lower case without diacritics, single spaces: "Tehnična  pomoč" == "tehnicna pomoc"."""
+    t = unicodedata.normalize("NFKD", text.casefold())
+    return " ".join("".join(c for c in t if not unicodedata.combining(c)).split())
+
+
+def rule_verdict(rules, title: str, description: str) -> str | None:
+    """None = notify. Otherwise the reason it is held back (fail closed: an unclear place is not "Idrija")."""
+    t = _norm(title)
+    for r in rules:
+        if any(_norm(x) in t for x in r.title_contains):
+            d = _norm(description)
+            for ph in r.ignore_phrases:
+                d = d.replace(_norm(ph), " ")
+            if any(_norm(x) in d for x in r.require_any):
+                return None
+            return f"'{title}' without {' / '.join(r.require_any)} in the description"
+    return None
 
 
 def pushover_from_env() -> tuple[str, str] | None:
@@ -83,6 +104,8 @@ class PushFeed:
         self.last_ok_at: float | None = None
         self.notified = 0
         self.last_error = ""
+        self.filtered = 0
+        self.last_filtered = ""
 
     @property
     def _key(self) -> str:
@@ -90,7 +113,8 @@ class PushFeed:
 
     def snapshot(self) -> dict:
         return {"url": self.cfg.url, "ok": self.ok, "last_ok_at": self.last_ok_at, "notified": self.notified,
-                "error": self.last_error, "pushover": self.notifier is not None}
+                "error": self.last_error, "pushover": self.notifier is not None,
+                "filtered": self.filtered, "last_filtered": self.last_filtered}
 
     async def run(self) -> None:
         while True:
@@ -133,6 +157,13 @@ class PushFeed:
             age = (now - it.pub_date) if it.pub_date else None
             if self._first and (age is None or age > max_age):
                 self.store.push_record(name, it, now, "ignored_old")
+                continue
+            why = rule_verdict(self.cfg.rules, it.title, it.description)
+            if why:  # a deliberate "no": remembered, so it is neither retried nor sent later
+                self.store.push_record(name, it, now, "filtered")
+                self.filtered += 1
+                self.last_filtered = why
+                log.warning("PUSH_FILTERED feed=%s guid=%s: %s", name, it.guid, why)
                 continue
             if self.notifier is None:
                 self.alerts.raise_("pushover", "a push feed has news but Pushover is not configured "

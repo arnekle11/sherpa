@@ -51,6 +51,16 @@ class AlertsCfg(_Base):
     telegram_api_base: str = "https://api.telegram.org"
 
 
+class PushRule(_Base):
+    """For items whose title contains one of `title_contains`: notify only if the description names the place.
+
+    Matching ignores case and diacritics. `ignore_phrases` are removed from the description first (e.g. "PGD Idrija"
+    names the fire brigade, not the place of the event). A missing or unclear place means: do NOT notify."""
+    title_contains: list[str] = Field(min_length=1)
+    require_any: list[str] = Field(min_length=1)
+    ignore_phrases: list[str] = []
+
+
 class PushFeedCfg(_Base):
     """A second feed that only sends Pushover notifications (secrets: SHERPA_PUSHOVER_TOKEN/_USER in .env)."""
     name: str = Field(pattern=r"^[A-Za-z0-9 ._\-]{1,40}$")
@@ -62,6 +72,7 @@ class PushFeedCfg(_Base):
     priority: int = Field(1, ge=-1, le=1)         # 1 = high priority (ignores quiet hours); 2 is not offered
     sound: str = Field("", pattern=r"^[a-z_]*$")  # Pushover sound name, empty = the app's default
     expected_link_contains: str | None = None
+    rules: list[PushRule] = []                    # the first rule whose title matches decides; no match = notify
     user_agent: str = "SHERPA (private first-responder notifier)"
 
 

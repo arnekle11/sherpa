@@ -15,6 +15,10 @@ push_feeds: []
 #    poll_interval_s: 5
 #    priority: 1            # 1 = high (rings through quiet hours), 0 = normal, -1 = quiet
 #    expected_link_contains: "OD/4279"
+#    rules:                 # only for these types require the place in the description; no place = no notification
+#      - title_contains: ["Tehnična pomoč", "Dimniški požar"]
+#        require_any: ["Idriji", "mestu Idrija"]
+#        ignore_phrases: ["PGD Idrija", "NMP Idrija", "občini Idrija"]   # names of brigades/units, not the place
 
 devices:
   - name: led-bar-1

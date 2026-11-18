@@ -80,3 +80,7 @@ to `config.yaml` (see `push_feeds` in `config.example.yaml`) and run `docker com
 notification (title, place and time, link to the map). Old items are not sent when the service starts, an undelivered one
 is retried, and a feed or Pushover problem raises a normal SHERPA alert. The feeds are not editable in the web UI yet,
 but saving settings there keeps them.
+
+A push feed can have `rules`: for items whose title matches a rule, the description must name the place (matching
+ignores case and diacritics, `ignore_phrases` are removed first); otherwise nothing is sent, and the item is logged as
+`PUSH_FILTERED`. Types without a rule are always sent. A missing place means "do not notify" for those types.
